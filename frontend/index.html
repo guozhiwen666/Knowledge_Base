@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<!--
+  知识库管理平台 · 前端单页应用入口
+  纯静态 SPA：无构建步骤，双击本文件或由静态服务器托管即可运行。
+  图表库 ECharts 从 vendor/echarts.min.js 本地引入（若该文件缺失，
+  可改用 CDN，见 README.md 的说明段）。
+-->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>知识库管理平台</title>
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/features.css" />
+  <!-- 图表库：本地 vendor 优先，缺失时可替换为 CDN 地址 -->
+  <script src="vendor/echarts.min.js"></script>
+</head>
+<body>
+  <!-- 应用根节点：所有页面由 js/app.js 按 hash 路由挂载到此处 -->
+  <div id="app">
+    <!-- 首屏加载占位：避免 JS 尚未执行时出现白屏（9.4 要求 <100ms 不出现空白闪屏） -->
+    <div class="boot-screen">
+      <div class="boot-spinner"></div>
+      <p>正在加载知识库管理平台…</p>
+    </div>
+  </div>
+
+  <!-- 轻提示容器 -->
+  <div id="toast-host" class="toast-host"></div>
+  <!-- 模态框容器（数据权限配置弹窗、表单弹窗复用） -->
+  <div id="modal-host"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
