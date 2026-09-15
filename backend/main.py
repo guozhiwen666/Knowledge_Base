@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from api import ai, auth, dashboard, knowledge, org, settlement
+from api import ai, auth, dashboard, health, knowledge, org, settlement
 from core.config import BACKEND_ROOT, PROJECT_ROOT, get_settings
 from core.container import get_container
 from core.db import ping_database
@@ -86,10 +86,19 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # 第 2 步：CORS。前端静态站点与后端不同源，必须放行；
-    # 演示环境用 "*"，生产应改为具体来源
+    # 生产通过 CORS_ALLOW_ORIGINS 锁定前端来源，未配置则回退 "*" 并告警
+    cors_origins = [
+        o.strip() for o in settings.cors_allow_origins.split(",") if o.strip()
+    ]
+    if not cors_origins:
+        logger.warning(
+            "CORS_ALLOW_ORIGINS 未配置，回退为 '*'（任意来源可调用 API）；"
+            "生产环境请显式设置前端来源"
+        )
+        cors_origins = ["*"]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=False,  # 用 Bearer 令牌而非 Cookie，因此不需要凭证
         allow_methods=["*"],
         allow_headers=["*"],
@@ -103,6 +112,7 @@ def create_app() -> FastAPI:
     app.include_router(ai.router)
     app.include_router(dashboard.router)
     app.include_router(settlement.router)
+    app.include_router(health.router)
 
     # 第 4 步：挂载前端静态站点。放在最后注册，保证 /api 路由优先匹配
     if FRONTEND_DIR.is_dir():

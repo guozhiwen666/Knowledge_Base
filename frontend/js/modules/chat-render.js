@@ -5,13 +5,54 @@
  *   用户气泡 / FAQ 命中标记 / AI 回答（Markdown）/
  *   知识引用来源卡片 / 权限缺失提示卡片
  *
+ * 另外提供两个整块渲染入口：
+ *   renderStreamHtml   —— 右侧对话区（历史回放视图 / 当前本地会话二选一）
+ *   historyBannerHtml  —— 历史回放视图顶部的说明条
+ *
  * 渲染层只读状态、不碰网络与事件，因此可以独立成文件并单独调试。
  * 所有插入模板的动态值一律经过 esc() 转义；回答正文交给 renderMarkdown()
  * （其内部先整体转义再做标记替换，保证不产生可执行的 HTML）。
  */
 
-import { esc } from '../core/dom.js';
+import { esc, fmtNumber } from '../core/dom.js';
 import { renderMarkdown } from '../core/markdown.js';
+
+/**
+ * 渲染右侧对话区。
+ * @param {object} session 当前本地会话（{ title, turns }），可为 null
+ * @param {object} view    历史回放视图（{ sessionId, turns, total }），非空时优先
+ * @returns {string} HTML
+ */
+export function renderStreamHtml(session, view) {
+  // 第 1 部分：历史回放 —— 顶部说明条 + 该会话的全部轮次（复用实时对话的渲染）
+  if (view) {
+    const turnsHtml = view.turns.length
+      ? view.turns.map((turn, index) => renderTurnHtml(turn, index)).join('')
+      : renderEmptyChat();
+    return historyBannerHtml(view.sessionId, view.total) + turnsHtml;
+  }
+
+  // 第 2 部分：当前本地会话
+  if (!session || !session.turns.length) return renderEmptyChat();
+  return session.turns.map((turn, index) => renderTurnHtml(turn, index)).join('');
+}
+
+/** 历史回放视图顶部的说明条（含「回到当前会话」按钮） */
+export function historyBannerHtml(sessionId, total) {
+  return `
+    <div class="review-panel mb16">
+      <div class="row-between">
+        <div>
+          <strong>历史会话回放</strong>
+          <div class="mute-sm">
+            session_id <span class="mono">${esc(sessionId)}</span> · 共 ${esc(fmtNumber(total))} 轮（只读）
+          </div>
+        </div>
+        <button class="btn btn-sm" type="button" data-role="exit-history">回到当前会话</button>
+      </div>
+    </div>
+  `;
+}
 
 /**
  * 渲染一轮问答。

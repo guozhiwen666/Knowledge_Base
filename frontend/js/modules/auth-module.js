@@ -15,6 +15,7 @@
 import { login } from '../api/auth.js';
 import { listRoles } from '../api/org.js';
 import { setSession, getUser, displayName, getPermissions, clearSession } from '../core/store.js';
+import { post } from '../api/client.js';
 import { navigate, homePath } from '../core/router.js';
 import { el, esc, $, toast, fmtNumber } from '../core/dom.js';
 
@@ -186,8 +187,13 @@ export async function renderProfile() {
     ? `<div class="row">${codes.map((code) => `<span class="tag mono">${esc(code)}</span>`).join('')}</div>`
     : '<div class="mute-sm">该账号没有任何权限码，请联系管理员在角色管理中分配。</div>';
 
-  // 第 4 步：退出登录
-  $('[data-role="logout"]', container).addEventListener('click', () => {
+  // 第 4 步：退出登录（先通知后端吊销令牌，再清本地会话）
+  $('[data-role="logout"]', container).addEventListener('click', async () => {
+    try {
+      await post('/api/auth/logout');
+    } catch {
+      /* 后端未实现登出或网络异常：前端照常清本地会话 */
+    }
     clearSession();
     toast('已退出登录', 'success');
     navigate('/login');

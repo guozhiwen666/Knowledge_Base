@@ -16,12 +16,14 @@
 **fail-closed**：权限引擎一旦出错（取数失败、数据异常），结果是**全部计入未授权**，
 绝不因为异常而放行 —— 放行是安全事故，拒绝只是体验问题。
 
-**刻意不做的事**（需求未写明，见第 14 章【待确认】）：
+**两条已裁决的边界**（第 14 章 #9 / #10 确认列）：
 
-* **部门树上下级继承**：2.9.4 只说"满足配置的数据权限实体"，未提继承，
-  因此仅做精确匹配，父子部门不互相继承；
-* **管理员绕过**：需求没有规定系统管理员 / 知识管理员天然可见全部单元，
-  因此本引擎一视同仁，管理员同样受默认拒绝约束。
+* **部门树上下级继承 = 继承**：原 6.4 表格按"不继承"实现，现已确认改为继承。
+  语义是"用户所属部门的**下级**部门授权同样命中"，即父部门的人能看到子部门的知识，
+  反之（子部门的人看父部门的知识）不成立。因此匹配范围 = 用户部门自身 ∪ 其全部祖先部门。
+* **管理员绕过 = 是**：系统管理员与知识管理员角色天然可见全部知识单元。
+  绕过名单由配置项 ``admin_role_codes`` 给出（默认 ``sys_admin`` / ``kb_admin``），
+  不写死在代码里 —— 换一套角色编码不用改代码。
 """
 
 from __future__ import annotations
@@ -52,15 +54,42 @@ class PermissionResult(NamedTuple):
     unauthorized_unit_ids: list[int]
 
 
+class _UserContext(NamedTuple):
+    """鉴权所需的用户上下文（一次取数，避免 N+1）。
+
+    :param user_id: 用户 id。
+    :param department_scope: 部门匹配范围 = 用户部门自身 ∪ 其祖先部门（#9 继承）。
+        用户无部门时为空集。
+    :param role_ids: 用户全部角色 id。
+    :param role_codes: 用户全部角色编码，用于 #10 的管理员绕过判定。
+    """
+
+    user_id: int
+    department_scope: frozenset[int]
+    role_ids: frozenset[int]
+    role_codes: frozenset[str]
+
+
 class DataPermissionEngine:
     """四维数据权限引擎。
 
     依赖注入：会话由外部传入。本类**全部方法只读**，不写库、不开事务。
     """
 
-    def __init__(self, session: Session) -> None:
-        """:param session: SQLAlchemy 会话。"""
+    def __init__(
+        self,
+        session: Session,
+        *,
+        inherit_departments: bool = True,
+        admin_role_codes: Iterable[str] = (),
+    ) -> None:
+        """:param session: SQLAlchemy 会话。
+        :param inherit_departments: 部门树是否上下级继承（第 14 章 #9，默认继承）。
+        :param admin_role_codes: 天然绕过数据权限的角色编码（第 14 章 #10）。
+        """
         self._session = session
+        self._inherit_departments = inherit_departments
+        self._admin_role_codes = frozenset(admin_role_codes)
 
     def check_permissions(
         self, user_id: int, unit_ids: Sequence[int]
@@ -77,22 +106,26 @@ class DataPermissionEngine:
             return PermissionResult([], [])
 
         try:
-            # 第 2 步：取用户上下文（所属部门 + 全部角色）
+            # 第 2 步：取用户上下文（部门匹配范围 + 角色 id + 角色编码）
             context = self._load_user_context(user_id)
             if context is None:
                 # 用户不存在（或被删）：无法判定身份，按 fail-closed 全部拒绝
                 return PermissionResult([], ordered_ids)
 
-            # 第 3 步：一次 IN 查询取回这批判单元的全部权限记录，避免逐个查库
+            # 第 3 步：管理员绕过的唯一出口（第 14 章 #10）。
+            # 放在四维判定之前，语义是"不参与数据权限校验"，而不是"额外多了一条授权规则"
+            if self._is_admin(context):
+                return PermissionResult(ordered_ids, [])
+
+            # 第 4 步：一次 IN 查询取回这批判单元的全部权限记录，避免逐个查库
             permissions = self._load_unit_permissions(ordered_ids)
 
-            # 第 4 步：逐个单元做四维 OR 判定
-            department_id, role_ids = context
+            # 第 5 步：逐个单元做四维 OR 判定
             authorized: list[int] = []
             unauthorized: list[int] = []
             for unit_id in ordered_ids:
                 rows = permissions.get(unit_id)
-                if rows and self._is_allowed(rows, department_id, role_ids, user_id):
+                if rows and self._is_allowed(rows, context):
                     authorized.append(unit_id)
                 else:
                     # 包含"没有任何权限记录"的情况 —— 默认拒绝
@@ -164,10 +197,10 @@ class DataPermissionEngine:
 
     # ------------------------------------------------------------------ 内部
 
-    def _load_user_context(self, user_id: int) -> tuple[int | None, set[int]] | None:
-        """取用户的部门与角色集合。
+    def _load_user_context(self, user_id: int) -> _UserContext | None:
+        """取用户上下文：部门匹配范围 + 角色 id + 角色编码。
 
-        :return: ``(department_id, role_ids)``；用户不存在返回 ``None``。
+        :return: :class:`_UserContext`；用户不存在返回 ``None``。
         """
         # 第 1 步：取用户行（一次查询即可拿到部门，同时用于判断用户是否存在）
         user = self._session.execute(
@@ -175,15 +208,61 @@ class DataPermissionEngine:
         ).scalar_one_or_none()
         if user is None:
             return None
-        # 第 2 步：取角色集合（可能为空集，空集时 role 维度永不命中）
-        role_ids = {
-            role_id
-            for role_id in self._session.execute(
-                select(UserRole.role_id).where(UserRole.user_id == user_id)
-            ).scalars()
-            if role_id is not None
+        # 第 2 步：取角色。一次 JOIN 把 id 与编码一起取回，供绕过判定复用
+        role_rows = self._session.execute(
+            select(Role.id, Role.role_code)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .where(UserRole.user_id == user_id)
+        ).all()
+        role_ids = frozenset(int(row[0]) for row in role_rows if row[0] is not None)
+        role_codes = frozenset(str(row[1]) for row in role_rows if row[1])
+        # 第 3 步：算出部门匹配范围（#9 继承确认后不再是单个 id）
+        scope = self._department_scope(user.department_id)
+        return _UserContext(user_id, scope, role_ids, role_codes)
+
+    def _is_admin(self, context: _UserContext) -> bool:
+        """判断是否属于"天然绕过数据权限"的管理员（第 14 章 #10）。
+
+        绕过名单来自配置项 ``admin_role_codes``，不写死在代码里。
+        名单为空集时本方法恒为假 —— 即"关闭管理员绕过"。
+        """
+        if not self._admin_role_codes:
+            return False
+        return bool(self._admin_role_codes & context.role_codes)
+
+    def _department_scope(self, department_id: int | None) -> frozenset[int]:
+        """算出部门维度的匹配范围。
+
+        #9 确认为**继承**：用户所属部门的下级部门授权同样命中，因此范围是
+        "用户部门自身 ∪ 其全部祖先部门"。例如用户属"技术部"（父为"总部"），
+        则授权给"技术部"或"总部"的知识单元都能看到。
+
+        继承关闭时退化为"只匹配自身"，即原 6.4 表格的口径。
+        父链一次性取回后在内存里遍历，避免逐级查库。
+        """
+        if department_id is None:
+            # 无部门的用户：department 维度永不命中（6.4 明确规定）
+            return frozenset()
+        if not self._inherit_departments:
+            return frozenset({department_id})
+
+        # 第 1 步：一次取回全部部门的父子关系（部门是小表，全量取回远快于逐级查库）
+        parents = {
+            int(row[0]): row[1]
+            for row in self._session.execute(
+                select(Department.id, Department.parent_id)
+            ).all()
         }
-        return user.department_id, role_ids
+        # 第 2 步：沿父链上溯，用 seen 防脏数据造成的环
+        scope: set[int] = set()
+        current: int | None = department_id
+        while current is not None and current not in scope:
+            scope.add(current)
+            parent = parents.get(current)
+            if parent is None or parent == 0:
+                break
+            current = int(parent)
+        return frozenset(scope)
 
     def _load_unit_permissions(
         self, unit_ids: Sequence[int]
@@ -206,18 +285,13 @@ class DataPermissionEngine:
         return grouped
 
     @staticmethod
-    def _is_allowed(
-        rows: Iterable[tuple[str, int]],
-        department_id: int | None,
-        role_ids: set[int],
-        user_id: int,
-    ) -> bool:
+    def _is_allowed(rows: Iterable[tuple[str, int]], context: _UserContext) -> bool:
         """判定单个单元是否放行：四类实体命中任意一种即可（OR 逻辑）。
 
-        对应 2.9.4 的四条匹配规则：
+        对应 2.9.4 的四条匹配规则（部门那条按 #9 改为范围匹配）：
 
         * ``global``：全局公开，直接放行；
-        * ``department``：用户所属部门与 ``target_id`` 精确相等（无部门则不匹配）；
+        * ``department``：``target_id`` 落在用户的部门匹配范围内（无部门则不匹配）；
         * ``role``：用户任一角色的 id 与 ``target_id`` 相等；
         * ``user``：``target_id`` 就是用户本人。
         """
@@ -225,20 +299,20 @@ class DataPermissionEngine:
             # 规则 1：全局公开
             if target_type == TargetType.GLOBAL.value:
                 return True
-            # 规则 2：部门精确匹配（用户无部门时该条不适用）
+            # 规则 2：部门范围匹配（#9 继承确认后含祖先部门；无部门时范围为空集）
             if target_type == TargetType.DEPARTMENT.value:
-                if department_id is not None and target_id == department_id:
+                if target_id in context.department_scope:
                     return True
                 continue
             # 规则 3：角色匹配（多角色取并集）
             if target_type == TargetType.ROLE.value:
-                if target_id in role_ids:
+                if target_id in context.role_ids:
                     return True
                 continue
             # 规则 4：个人匹配
             if (
                 target_type == TargetType.USER.value
-                and target_id == user_id
+                and target_id == context.user_id
             ):
                 return True
             # 其他取值（脏数据）一律忽略，不影响其余规则判定

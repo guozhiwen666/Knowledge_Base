@@ -23,14 +23,17 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
 from core.config import get_settings
+from core.container import get_container
 from core.db import get_session
 from core.response import PermissionDeniedError, UnauthorizedError
 from services.authentication_and_authorization_module.auth import AuthService, TokenInvalid
+from services.data_permission_engine.permission import DataPermissionEngine
 
 __all__ = [
     "CurrentUser",
     "get_auth_service",
     "get_current_user",
+    "get_permission_engine",
     "require_permission",
 ]
 
@@ -48,12 +51,14 @@ class CurrentUser(NamedTuple):
 
 
 def get_auth_service(session: Session = Depends(get_session)) -> AuthService:
-    """构造认证服务。密钥与有效期来自配置。"""
+    """构造认证服务。密钥与有效期来自配置；缓存用于令牌吊销黑名单。"""
     settings = get_settings()
     return AuthService(
         session,
         secret=settings.jwt_secret,
         token_ttl_seconds=settings.jwt_expire_minutes * 60,
+        cache=get_container().cache,
+        blacklist_prefix=settings.token_blacklist_prefix,
     )
 
 
@@ -73,6 +78,14 @@ def get_current_user(
         payload = auth.decode_token(credentials.credentials)
     except TokenInvalid as exc:
         raise UnauthorizedError(str(exc)) from exc
+    # 第 3 步：吊销黑名单检查（登出后即使未过期也立即失效）
+    try:
+        if auth.is_token_blacklisted(credentials.credentials):
+            raise UnauthorizedError("令牌已吊销，请重新登录")
+    except UnauthorizedError:
+        raise
+    except Exception:  # noqa: BLE001 - 黑名单查不到不应阻断正常请求
+        pass
     # 第 3 步：从载荷还原用户身份
     return CurrentUser(
         user_id=int(payload.get("user_id")),
@@ -100,3 +113,20 @@ def require_permission(permission_code: str) -> Callable:
         return user
 
     return _dependency
+
+
+def get_permission_engine(
+    session: Session = Depends(get_session),
+) -> DataPermissionEngine:
+    """构造数据权限引擎依赖，边界规则取自配置（第 14 章 #9 / #10）。
+
+    集中在这里而不是让每个路由自己 new，是为了保证**同一份配置只被解释一次** ——
+    部门继承与管理员绕过这两个开关若在两处各读一遍，迟早出现
+    "对外鉴权接口继承了、AI 链路没继承"这种两边判定不一致的问题。
+    """
+    settings = get_settings()
+    return DataPermissionEngine(
+        session,
+        inherit_departments=settings.dept_permission_inherit,
+        admin_role_codes=settings.admin_role_codes,
+    )

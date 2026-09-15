@@ -84,40 +84,54 @@ frontend/
 │  └─ echarts.min.js               图表库（本地引入，无 npm 依赖）
 └─ js/
    ├─ app.js                       入口：注册路由、装配外壳、启动
-   ├─ api/                         接口层（只封装文档 8 章的 21 个接口）
+   ├─ api/                         接口层
    │  ├─ client.js                 BASE_URL、请求拦截器、401 处理、带进度的上传
    │  ├─ auth.js                   POST /api/auth/login
-   │  ├─ org.js                    组织接口（部门树 / 用户 / 角色 / 角色权限）
-   │  ├─ knowledge.js              知识接口（导入 / 列表 / 详情 / 更新 / 权限 / 删除 / 鉴权）
-   │  ├─ ai.js                     POST /api/ai/chat/stream
+   │  ├─ org.js                    组织接口（部门树/写、用户列表/详情/重置口令/删除、角色 CRUD、角色权限）
+   │  ├─ knowledge.js              知识接口（导入 / 进度轮询 / 列表 / 新建 / 详情 / 更新 / 状态 / 权限 / 删除 / 鉴权）
+   │  ├─ ai.js                     AI 接口（SSE 流式问答 / 历史会话列表 / 会话明细）
    │  ├─ dashboard.js              看板接口（指标 / 双榜 / 趋势）
-   │  └─ settlement.js             沉淀接口（推荐 / 审核 / 缺口）
+   │  └─ settlement.js             沉淀接口（推荐 / 审核 / FAQ 库 / 下线 / 缺口列表 / 补全 / 忽略）
    ├─ core/                        基础设施
    │  ├─ store.js                  sessionStorage 会话、权限判断
    │  ├─ router.js                 hash 路由 + 登录态与菜单权限守卫
    │  ├─ shell.js                  顶栏 + 侧边栏 + 动态菜单
    │  ├─ sse.js                    fetch + ReadableStream 手动解析 SSE
    │  ├─ markdown.js               自写的极简 Markdown → HTML（先转义再替换）
-   │  └─ dom.js                    el / esc / toast / modal / 三种占位态 / 格式化
+   │  ├─ pager.js                  通用分页条模板（知识单元 / 用户 / FAQ 三处共用）
+   │  └─ dom.js                    el / esc / toast / modal / 占位态 / 格式化
    └─ modules/                     业务模块（对应 2.9.5 七个模块）
       ├─ auth-module.js            认证与权限控制 + 个人中心
       ├─ org-module.js             组织架构：Tab 容器 + 角色管理
-      ├─ org-user-management.js    用户管理
+      ├─ org-role-form.js          角色表单弹窗（新增 / 编辑）
+      ├─ org-user-management.js    用户管理（列表 / 筛选 / 分页 / 行内操作）
+      ├─ org-user-table.js         用户表格模板
       ├─ org-user-form.js          用户表单模板与取值
-      ├─ org-department.js         部门树
+      ├─ org-user-reset.js         重置口令弹窗（含明文口令展示）
+      ├─ org-department.js         部门树 + 成员列表 + 节点操作
+      ├─ org-department-form.js    部门表单弹窗
       ├─ org-role-permissions.js   角色权限树组件
+      ├─ org-options.js            部门 / 角色 / 用户下拉选项（带缓存与树拍平）
       ├─ knowledge-module.js       知识模块路由入口
-      ├─ knowledge-import.js       导入中心（拖拽 + 并发上传 + 进度）
+      ├─ knowledge-import.js       导入中心（拖拽 + 并发上传 + 两段进度）
+      ├─ import-queue.js           导入队列模型与表格渲染 + 上传区交互
+      ├─ import-progress.js        解析进度轮询器（定时器与终态判定）
       ├─ knowledge-unit-list.js    知识单元列表
-      ├─ unit-list-table.js        列表表格与分页模板
+      ├─ knowledge-unit-form.js    手工新建知识单元弹窗
+      ├─ unit-list-table.js        列表表格模板
       ├─ knowledge-detail.js       知识单元详情与编辑
       ├─ permission-dialog.js      数据权限配置弹窗（四组实体同一弹窗）
-      ├─ chat-module.js            AI 对话工作台
-      ├─ chat-render.js            对话渲染（回答 / 引用卡片 / 权限提示卡片）
+      ├─ permission-selects.js     四组实体的多选组件（部门树 / 角色 / 人员）
+      ├─ chat-module.js            AI 对话工作台（状态与交互）
+      ├─ chat-render.js            对话渲染（回答 / 引用卡片 / 权限提示 / 历史回放）
       ├─ chat-stream.js            SSE 七事件 → 轮次状态映射
+      ├─ chat-send.js              一次提问的生命周期与流的中断管理
+      ├─ chat-history.js           左侧会话栏取数（本地会话 + 服务端历史会话）
       ├─ dashboard-module.js       数据看板
       ├─ dashboard-charts.js       ECharts 封装
-      ├─ settlement-module.js      知识沉淀管理
+      ├─ settlement-module.js      知识沉淀管理（页面外壳 / 推荐审核 / 缺口）
+      ├─ settlement-faq-library.js FAQ 库（分页 / 状态筛选 / 下线）
+      ├─ settlement-gap-actions.js 知识缺口补全与忽略
       └─ settlement-review.js      FAQ 审核弹窗
 ```
 
@@ -148,25 +162,47 @@ frontend/
 | 会话存储 | Token / user_info / permissions 存 `sessionStorage`，关闭标签页即失效 |
 | 请求拦截 | `js/api/client.js` 统一附加 `Authorization: Bearer <token>`；收到 401 清会话并跳登录页（403 不跳登录） |
 | 响应解包 | 统一拆 `{code, message, data}`；`code !== 0` 抛 `ApiError`，页面按需分支 |
+| 空串查询参数 | 默认丢弃空串（「不筛选」=「不传参」）；个别接口把空串当有效取值（`GET /api/settlement/faqs` 的 `status=` 表示不限状态），由调用方用 `keepEmpty` 显式声明 |
 | SSE | `EventSource` 不支持 POST，故用 `fetch` + `ReadableStream` 按 `event:` / `data:` 逐行解析，处理 4.8 的七种事件 |
 | 流式渲染 | 自写极简 Markdown（标题 / 粗体 / 列表 / 代码块 / 行内代码 / 换行），**先整体 HTML 转义再做标记替换**，防 XSS |
-| 批量上传 | 并发度 3 的分批 `Promise.allSettled`，单个失败不中断其余；进度为 XHR 的真实上传字节进度 |
-| 权限弹窗 | 全局（开关）/ 部门（多选树）/ 角色（多选）/ 人员（多选）四组同一弹窗，提交结构直接对应 `POST /api/knowledge/units/{id}/permissions` 的 `permissions` 数组 |
+| 两段导入进度 | 上传进度来自 XHR 的真实字节进度（并发度 3 的分批 `Promise.allSettled`）；解析进度由 `import-progress.js` 每 1.8 秒轮询 `GET /api/knowledge/import/progress`，`all_finished` 为真或达到次数上限即停止，路由切走时清理定时器 |
+| 历史对话 | 左侧列出 `GET /api/ai/conversations`（最近提问摘要 / 轮数 / 时间），点击后拉 `GET /api/ai/conversations/{session_id}` 并复用对话渲染函数回放（`cited_units` 映射成引用来源卡片）；后端对非本人会话返回 404，页面原样提示 |
+| 明文口令 | 重置口令走独立接口，响应里的明文口令只在弹窗里展示一次（库里只存哈希），提示管理员立即转达 |
+| 权限弹窗 | 全局（开关）/ 部门（多选树）/ 角色（多选）/ 人员（多选）四组同一弹窗，提交结构直接对应 `POST /api/knowledge/units/{id}/permissions` 的 `permissions` 数组。人员选项来自 `GET /api/org/users`（要求 `menu:org`）；取不到时退化为只读展示已配置的人员实体，保存按原值保留，避免全量覆盖把看不见的授权清空 |
 | 图表 | ECharts 双 Y 轴折线（Token + 响应时间），支持日 / 周切换；**数据为空时显示空态而非空白画布** |
 | 空态与防白屏 | 首屏有 boot 引导屏；页面外壳同步返回、内容区先挂 loading，保证 100ms 内有骨架 |
 | 按钮级权限 | 按登录返回的 `permissions` 控制增删改按钮显隐；无权限时用 `disabled` + `title` 说明所需权限码 |
-| 资源清理 | 路由切走时中断进行中的 SSE 连接、`dispose()` 全部 ECharts 实例 |
+| 后端报错如实展示 | 422 等业务拒绝（部门有子部门 / 角色仍被使用 / 编码重复 / 格式不支持）一律显示后端 `message`，不替换成通用文案 |
+| 资源清理 | 路由切走时中断进行中的 SSE 连接与解析进度轮询、`dispose()` 全部 ECharts 实例 |
 
 ---
 
-## 6. 仅使用文档第 8 章的接口
+## 6. 使用的接口范围
 
-前端**只调用**文档 8.8 清单中的 21 个接口，不新增、不改名、不猜端点。
-完整映射见 `js/api/*.js` 的文件头注释。
+前端调用后端在文档 **8 章列出的 21 个接口**，加上第 14 章确认后**补齐的 20 个接口**
+（共 41 个），不新增、不改名、不猜端点。完整映射见 `js/api/*.js` 的文件头注释。
 
-凡是 2.9.3 有诉求但 8 章没有对应接口的页面元素，一律显示
-**「该功能待接口确认」** 占位块（`js/core/dom.js` 的 `pendingBlock()`），
-并在块内写明缺失的是哪个接口。清单见项目根目录的交付说明。
+补齐的 20 个接口：
+
+| 模块 | 接口 | 页面落位 |
+| --- | --- | --- |
+| 知识 | `POST /api/knowledge/units` | 知识单元列表 · 手工新建 |
+| 知识 | `PUT /api/knowledge/units/{id}/status` | 知识单元列表 · 置为 active |
+| 知识 | `GET /api/knowledge/import/progress` | 导入中心 · 解析进度轮询 |
+| 组织 | `GET/DELETE /api/org/users`、`GET /api/org/users/{id}` | 用户管理 · 列表 / 删除 |
+| 组织 | `POST /api/org/users/{id}/reset-password` | 用户管理 · 重置口令 |
+| 组织 | `POST/PUT/DELETE /api/org/departments`、`GET /api/org/departments/{id}/members` | 部门管理 · 增删改与成员列表 |
+| 组织 | `POST/PUT/DELETE /api/org/roles` | 角色管理 · 增删改 |
+| AI | `GET /api/ai/conversations`、`GET /api/ai/conversations/{session_id}` | AI 工作台 · 历史对话与回放 |
+| 沉淀 | `GET /api/settlement/faqs`、`POST /api/settlement/faqs/{id}/offline` | 沉淀页 · FAQ 库与下线 |
+| 沉淀 | `POST /api/settlement/knowledge-gaps/{id}/resolve`、`.../ignore` | 沉淀页 · 一键建档 / 忽略 |
+
+`POST /api/knowledge/import` 的响应结构随之变化：`accepted` 只给 `task_id`
+（解析改为后台异步），入库结果（`unit_code` / `chunk_count`）从进度接口取。
+
+`js/core/dom.js` 的 `pendingBlock()` 函数与 `.pending-block` 样式保留：样式仍在用
+（权限不足、审核可编辑性这类**非缺接口**的说明块），函数本身目前没有调用方，
+留作后续新增页面时的占位设施。此前因「接口未确认」而做的占位块已全部替换为真实实现。
 
 ---
 

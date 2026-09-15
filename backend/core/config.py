@@ -60,6 +60,16 @@ class Settings:
     app_host: str = "127.0.0.1"
     app_port: int = 8000
 
+    # ---- CORS（生产须锁定前端来源，逗号分隔；为空则回退 "*" 并告警）----
+    cors_allow_origins: str = ""
+
+    # ---- 登录限流（P1 安全加固）----
+    # 同一用户名 / 同一 IP 在 lock_window 秒内的失败上限，超过返回 429
+    login_max_attempts: int = 5
+    login_lock_window_seconds: int = 300
+    # 令牌黑名单前缀（登出时把 jti 写入缓存，TTL=令牌剩余有效期）
+    token_blacklist_prefix: str = "kb:token:blacklist:"
+
     # ---- MySQL（2.9.7 的 10 张表）----
     db_host: str = "127.0.0.1"
     db_port: int = 3306
@@ -104,6 +114,25 @@ class Settings:
 
     # ---- 本地存储兜底目录 ----
     storage_root: str = "storage"
+
+    # ---- 业务阈值（第 14 章 #8 的确认值）----
+    # FAQ 挖掘的推荐触发频次。低于该频次的问题模式不生成推荐项。
+    faq_min_frequency: int = 50
+    # 召回相似度阈值。低于该值的候选不计入 recalled_unit_ids_json，
+    # 于是"召回列表为空"等价于"没有达到阈值的内容支撑"，即 11.4 的知识缺口。
+    # 注意：#8 确认值是 0.8，但实测 text-embedding-v4 + COSINE 下正确命中的
+    # 相似度只有 0.7383~0.7913（无关提问最高 0.4129），0.8 会把真实命中全部误杀。
+    # 这里的默认值保留确认值，运行值由 `.env` 的 RECALL_SIMILARITY_THRESHOLD 覆盖。
+    recall_similarity_threshold: float = 0.8
+
+    # ---- 数据权限（第 14 章 #9 / #10 的确认值）----
+    # 部门树上下级继承：为真时，用户所属部门的下级部门（含自身）授权均可命中。
+    dept_permission_inherit: bool = True
+    # 天然绕过数据权限校验的角色编码（第 14 章 #10 确认为"是"）。
+    admin_role_codes: tuple[str, ...] = ("sys_admin", "kb_admin")
+
+    # ---- 多轮会话（第 14 章 #12 的确认值：保留 10 轮）----
+    conversation_context_rounds: int = 10
 
     # 组合字段（由上面几组拼出来，放在 dataclass 里做一次缓存）
     notes: tuple[str, ...] = field(default_factory=tuple)
@@ -157,6 +186,9 @@ def _load_settings() -> Settings:
     settings = Settings(
         app_host=_env("APP_HOST", "127.0.0.1"),
         app_port=_env_int("APP_PORT", 8000),
+        cors_allow_origins=_env("CORS_ALLOW_ORIGINS", ""),
+        login_max_attempts=_env_int("LOGIN_MAX_ATTEMPTS", 5),
+        login_lock_window_seconds=_env_int("LOGIN_LOCK_WINDOW_SECONDS", 300),
         db_host=_env("DB_HOST", "127.0.0.1"),
         db_port=_env_int("DB_PORT", 3306),
         db_user=_env("DB_USER", "root"),
@@ -194,6 +226,16 @@ def _load_settings() -> Settings:
         embedding_model=_env("TEXT_EMBEDDING_MODEL", "text-embedding-v4"),
         embedding_batch_size=_env_int("TEXT_EMBEDDING_BATCH_SIZE", 10),
         storage_root=_env("STORAGE_ROOT_DIR", "storage"),
+        faq_min_frequency=_env_int("FAQ_MIN_FREQUENCY", 50),
+        recall_similarity_threshold=_env_float("RECALL_SIMILARITY_THRESHOLD", 0.8),
+        dept_permission_inherit=_env("DEPT_PERMISSION_INHERIT", "true").lower()
+        in ("1", "true", "yes"),
+        admin_role_codes=tuple(
+            code.strip()
+            for code in _env("ADMIN_ROLE_CODES", "sys_admin,kb_admin").split(",")
+            if code.strip()
+        ),
+        conversation_context_rounds=_env_int("CONVERSATION_CONTEXT_ROUNDS", 10),
     )
     return settings
 

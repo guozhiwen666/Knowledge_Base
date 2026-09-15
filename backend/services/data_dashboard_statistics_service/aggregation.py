@@ -162,8 +162,8 @@ def rank_units(
     语句也会难读到没法维护。这里改为取回 JSON 列后在内存展开 ——
     牺牲少量内存，换取可读与可测；数据量显著增大时再考虑下推。
 
-    :param field: 统计口径，``recalled``（召回）或 ``authorized``（已授权），
-        默认按召回统计（涵盖"想找但没看到"的那部分热度）。
+    :param field: 统计口径。**第 14 章 #11 已确认为 ``recalled``**（召回口径，
+        涵盖"想找但没看到"的那部分热度）；``authorized`` 仅保留为可切换项。
     """
     # 第 1 步：只取目标列，减少不必要的列传输
     stmt = select(_unit_ids_column(field))

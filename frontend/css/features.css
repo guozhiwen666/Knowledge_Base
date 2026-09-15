@@ -50,20 +50,18 @@
 .dropzone:hover { border-color: var(--c-primary); }
 .dropzone.dragover { border-color: var(--c-primary); background: var(--c-primary-soft); }
 .dropzone .dz-title { font-size: 15px; font-weight: 500; margin-bottom: 4px; }
-.upload-list { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-.upload-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-sm);
-  font-size: 13px;
-  flex-wrap: wrap;
+/* ---- 进度条（导入中心的「上传与解析进度」表格用） ---- */
+.bar {
+  display: inline-block;
+  width: 120px;
+  height: 6px;
+  background: #eef1f6;
+  border-radius: 3px;
+  overflow: hidden;
+  vertical-align: -1px;
+  margin-right: 6px;
 }
-.upload-item .name { flex: 1 1 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upload-item .bar { width: 120px; height: 6px; background: #eef1f6; border-radius: 3px; overflow: hidden; }
-.upload-item .bar > i { display: block; height: 100%; background: var(--c-primary); transition: width 0.2s; }
+.bar > i { display: block; height: 100%; background: var(--c-primary); transition: width 0.2s; }
 
 /* ---- 树（部门树 / 权限选择树共用） ---- */
 .tree { font-size: 13px; }
@@ -111,6 +109,15 @@
   border-radius: var(--radius);
   padding: 12px;
   overflow-y: auto;
+}
+/* 会话栏里的小标题：壳层侧边栏的 .nav-group-title 只作用于 .shell-sidebar，
+   这里补一份，让「本次浏览器会话 / 历史对话」两个分组看起来是同级的 */
+.chat-side .nav-group-title {
+  padding: 12px 2px 6px;
+  font-size: 11px;
+  letter-spacing: 0.8px;
+  color: #6b7d99;
+  text-transform: uppercase;
 }
 .chat-main {
   display: flex;

@@ -12,6 +12,7 @@
 
 import { el, esc, $, loadingState, toast } from './dom.js';
 import { hasPermission, getUser, displayName, clearSession, getPermissions } from './store.js';
+import { post } from '../api/client.js';
 import { currentPathname, navigate, homePath } from './router.js';
 
 /** 菜单定义：分组 → 条目，每条带路由路径与所需权限码（与 9.3 路由表一致） */
@@ -88,10 +89,15 @@ function sidebarHtml() {
 }
 
 /**
- * 退出登录：清会话并回登录页。
- * 2.9.8 没有登出接口，因此这是纯前端行为，只清本地 sessionStorage。
+ * 退出登录：先通知后端吊销当前令牌（使 JWT 立即失效），再清本地会话。
+ * 后端无登出接口时（未部署 P1-7 加固）请求会 404，前端忽略即可，不影响退出。
  */
-function logout() {
+async function logout() {
+  try {
+    await post('/api/auth/logout');
+  } catch {
+    /* 后端未实现登出或网络异常：前端照常清本地会话 */
+  }
   clearSession();
   toast('已退出登录', 'success');
   window.location.hash = '/login';

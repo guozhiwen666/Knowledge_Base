@@ -1,0 +1,24 @@
+# 版本控制 / 本地环境
+.git
+.idea
+.workbuddy
+.venv
+
+# 密钥：切勿打进镜像
+.env
+
+# Python 缓存
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# 文档（被 .gitignore 忽略，且运行时不需）
+docs
+
+# 前端构建残留（当前为纯静态，无需）
+node_modules
+
+# 本地存储（运行时卷挂载）
+storage
+data/sample_docs

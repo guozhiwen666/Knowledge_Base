@@ -2,15 +2,20 @@
  * 模块七：知识沉淀与 FAQ 挖掘
  * （对应 9.1 第七个模块 / 页面 2.9.3-6 知识沉淀管理页）
  *
- * 需求落位：
- *   FAQ 推荐与审核     -> `GET /api/settlement/faqs/recommendations`（推荐频次 / 关联知识单元 / 建议答案）
- *                         + `POST /api/settlement/faqs/{id}/review`（通过 / 驳回 + 编辑答案）
- *   知识缺口列表       -> `GET /api/settlement/knowledge-gaps`（提问频次 / 最近提问时间 / 状态）
+ * 三块内容的接口落位：
+ *   1. FAQ 推荐与审核   -> `GET /api/settlement/faqs/recommendations` + `POST /api/settlement/faqs/{id}/review`
+ *   2. FAQ 库           -> `GET /api/settlement/faqs` + `POST /api/settlement/faqs/{id}/offline`
+ *                          （拆在 settlement-faq-library.js）
+ *   3. 知识缺口         -> `GET /api/settlement/knowledge-gaps`
+ *                          + `POST /api/settlement/knowledge-gaps/{id}/resolve|ignore`
+ *                          （操作弹窗拆在 settlement-gap-actions.js）
  *
- * 审核弹窗拆在 settlement-review.js。
+ * 审核弹窗拆在 settlement-review.js。三块各自独立加载，互不阻塞。
  *
- * **明确缺失、页面用占位说明的部分**（第 14 章【待确认】第 6、7 条）：
- *   已发布 FAQ 库的查询 / 下线接口、知识缺口「一键创建关联知识单元补全」接口。
+ * 缺口的两个新字段直接用上了：
+ *   `resolved_unit_id`  —— 已补全时对应的知识单元，列表里直接展示「由哪个单元补全」；
+ *   `sample_questions`  —— 样本提问，展示前两条并在补全弹窗里列全。
+ * 已 resolved / ignored 的行不再显示「一键建档」与「忽略」按钮（11.4 的状态语义）。
  */
 
 import { listFaqRecommendations, listKnowledgeGaps } from '../api/settlement.js';
@@ -18,13 +23,14 @@ import {
   el,
   esc,
   $,
-  pendingBlock,
   emptyState,
   loadingState,
   fmtNumber,
   fmtDateTime,
 } from '../core/dom.js';
 import { openReviewModal } from './settlement-review.js';
+import { renderFaqLibrary } from './settlement-faq-library.js';
+import { openGapResolveModal, confirmIgnoreGap } from './settlement-gap-actions.js';
 
 /** 知识缺口状态的展示映射（models/enums.py 的 KnowledgeGapStatus） */
 const GAP_STATUS = {
@@ -38,7 +44,7 @@ export function renderSettlement() {
   const container = el(`
     <div>
       <h2 class="page-title">知识沉淀管理</h2>
-      <p class="page-desc">FAQ 自动推荐与审核、已发布 FAQ 库、知识缺口列表</p>
+      <p class="page-desc">FAQ 自动推荐与审核、FAQ 库、知识缺口补全</p>
 
       <div class="card">
         <div class="card-title">
@@ -51,17 +57,7 @@ export function renderSettlement() {
         <div data-role="recs">${loadingState()}</div>
       </div>
 
-      <div class="card">
-        <div class="card-title">
-          <span>已发布 FAQ 库</span>
-          <span class="tag tag-warn">待接口确认</span>
-        </div>
-        ${pendingBlock(
-          '已发布 FAQ 库',
-          '2.9.3 要求展示已发布的 FAQ 库（含命中次数），但 8.7 只提供了「待审核推荐列表」「审核」「知识缺口列表」三个接口，没有已发布 FAQ 的查询与下线接口。因此本区块不做实现。',
-          '已发布 FAQ 列表查询 / 下线接口（8 章未列出）',
-        )}
-      </div>
+      <div data-role="faq-library">${loadingState()}</div>
 
       <div class="card">
         <div class="card-title">
@@ -72,35 +68,51 @@ export function renderSettlement() {
           </div>
         </div>
         <div data-role="gaps">${loadingState()}</div>
-        <div class="mt16">
-          ${pendingBlock(
-            '知识缺口一键建档',
-            '11.4 要求支持「一键创建关联知识单元补全」，但对应的接口未在 8 章列出。本页只展示缺口的提问频次与最近提问时间，不提供建档按钮。',
-            '知识缺口状态流转 / 关联知识单元接口（8 章未列出）',
-          )}
+        <div class="field-hint mt8">
+          「一键建档」会新建一个知识单元并关联本缺口（标题缺省用问题模式，正文缺省由后端拼出骨架）；
+          「忽略」保留记录但不再纳入未解决清单。已补全 / 已忽略的缺口不再显示这两个按钮。
         </div>
       </div>
     </div>
   `);
 
-  // 两个区块独立加载，互不阻塞
+  // 三块独立加载，互不阻塞
   const recsCache = { items: [] };
-  loadRecommendations(container, recsCache);
-  loadGaps(container);
+  const gapsCache = { items: [] };
+  const recsBox = $('[data-role="recs"]', container);
+  const gapsBox = $('[data-role="gaps"]', container);
+  const reloadRecs = () => loadRecommendations(recsBox, $('[data-role="rec-count"]', container), recsCache);
+  const reloadGaps = () => loadGaps(gapsBox, $('[data-role="gap-count"]', container), gapsCache);
 
-  $('[data-role="reload-recs"]', container).addEventListener('click', () =>
-    loadRecommendations(container, recsCache),
-  );
-  $('[data-role="reload-gaps"]', container).addEventListener('click', () => loadGaps(container));
+  // 事件只绑一次：列表是整体重渲染的，把监听挂在每次重渲染里会重复叠加
+  recsBox.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-act="review"]');
+    if (!btn) return;
+    const target = recsCache.items.find((item) => String(item.id) === btn.dataset.id);
+    if (target) openReviewModal(target, reloadRecs);
+  });
+  gapsBox.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-act]');
+    if (!btn || btn.disabled) return;
+    const gap = gapsCache.items.find((item) => String(item.id) === btn.dataset.id);
+    if (!gap) return;
+    if (btn.dataset.act === 'resolve') openGapResolveModal(gap, reloadGaps);
+    if (btn.dataset.act === 'ignore') confirmIgnoreGap(gap, reloadGaps);
+  });
+
+  $('[data-role="faq-library"]', container).replaceChildren(renderFaqLibrary());
+  reloadRecs();
+  reloadGaps();
+
+  $('[data-role="reload-recs"]', container).addEventListener('click', reloadRecs);
+  $('[data-role="reload-gaps"]', container).addEventListener('click', reloadGaps);
 
   return container;
 }
 
 /* ------------------------------------------------------ FAQ 推荐列表 */
 
-async function loadRecommendations(container, cache) {
-  const host = $('[data-role="recs"]', container);
-  const countBox = $('[data-role="rec-count"]', container);
+async function loadRecommendations(host, countBox, cache) {
   host.innerHTML = loadingState();
 
   let items;
@@ -171,21 +183,11 @@ async function loadRecommendations(container, cache) {
       审核通过后该问答对会写入 FAQ 缓存，后续相同问题将直接命中缓存。
     </div>
   `;
-
-  // 审核按钮 → 打开审核弹窗
-  host.addEventListener('click', (event) => {
-    const btn = event.target.closest('[data-act="review"]');
-    if (!btn) return;
-    const target = cache.items.find((item) => String(item.id) === btn.dataset.id);
-    if (target) openReviewModal(target, () => loadRecommendations(container, cache));
-  });
 }
 
 /* ------------------------------------------------------ 知识缺口列表 */
 
-async function loadGaps(container) {
-  const host = $('[data-role="gaps"]', container);
-  const countBox = $('[data-role="gap-count"]', container);
+async function loadGaps(host, countBox, cache) {
   host.innerHTML = loadingState();
 
   let items;
@@ -195,10 +197,11 @@ async function loadGaps(container) {
     host.innerHTML = `<div class="empty-state">加载失败：${esc(error.message)}</div>`;
     return;
   }
-  items = items || [];
-  countBox.textContent = `共 ${fmtNumber(items.length)} 条`;
+  cache.items = items || [];
+  const pending = cache.items.filter((gap) => gap.status === 'unresolved').length;
+  countBox.textContent = `共 ${fmtNumber(cache.items.length)} 条，其中未解决 ${fmtNumber(pending)} 条`;
 
-  if (!items.length) {
+  if (!cache.items.length) {
     host.innerHTML = emptyState('暂无知识缺口记录（召回相似度低于阈值或无可支撑单元时写入）');
     return;
   }
@@ -211,22 +214,45 @@ async function loadGaps(container) {
           <tr>
             <th style="width:56px">ID</th>
             <th>问题模式</th>
-            <th style="width:110px">提问频次</th>
-            <th style="width:170px">最近提问时间</th>
+            <th style="width:100px">提问频次</th>
+            <th>样本提问</th>
+            <th style="width:120px">补全单元</th>
+            <th style="width:150px">最近提问时间</th>
             <th style="width:110px">状态</th>
+            <th style="width:130px">操作</th>
           </tr>
         </thead>
         <tbody>
-          ${items
+          ${cache.items
             .map((gap) => {
               const meta = GAP_STATUS[gap.status] || { label: gap.status || '-', cls: 'tag' };
+              const samples = gap.sample_questions || [];
+              const unresolved = gap.status === 'unresolved';
               return `
               <tr>
                 <td>${esc(gap.id)}</td>
                 <td>${esc(gap.question_pattern || '-')}</td>
                 <td><span class="tag tag-warn">${esc(fmtNumber(gap.ask_count))} 次</span></td>
+                <td class="mute-sm">${
+                  samples.length
+                    ? `${esc(samples.slice(0, 2).join(' / '))}${samples.length > 2 ? ` 等 ${fmtNumber(samples.length)} 条` : ''}`
+                    : '-'
+                }</td>
+                <td>${
+                  gap.resolved_unit_id
+                    ? `<span class="tag mono">#${esc(gap.resolved_unit_id)}</span>`
+                    : '<span class="mute-sm">未补全</span>'
+                }</td>
                 <td class="mute-sm">${esc(fmtDateTime(gap.last_asked_at))}</td>
                 <td><span class="tag ${esc(meta.cls)}">${esc(meta.label)}</span></td>
+                <td class="actions">
+                  ${
+                    unresolved
+                      ? `<button class="btn-link" type="button" data-act="resolve" data-id="${esc(gap.id)}">一键建档</button>
+                         <button class="btn-link" type="button" data-act="ignore" data-id="${esc(gap.id)}">忽略</button>`
+                      : '<span class="mute-sm">已处理</span>'
+                  }
+                </td>
               </tr>`;
             })
             .join('')}

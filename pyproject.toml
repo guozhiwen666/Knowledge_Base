@@ -15,8 +15,9 @@ dependencies = [
     "pymilvus>=2.4.0",       # 向量库：kb_unit_chunks 集合结构定义
     "PyMySQL>=1.1.0",        # MySQL 驱动（SQLAlchemy 连接串 mysql+pymysql）
     "python-multipart>=0.0.9",  # FastAPI 接收 multipart/form-data（知识导入）
-    "redis>=5.0.0",          # 缓存：FAQ 加速 / 看板实时计数 / 会话
+    "redis>=5.0.0",          # 缓存：FAQ 加速 / 看板实时计数 / 会话 / 限流 / 令牌黑名单
     "pypdf>=4.0.0",          # 文档解析：PDF
     "python-docx>=1.1.0",    # 文档解析：Word(.docx)
     "uvicorn>=0.53.0",
+    "gunicorn>=23.0.0",      # 生产 WSGI/ASGI 进程管理器（多 worker 部署）
 ]

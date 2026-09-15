@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -79,16 +80,22 @@ class AuthService:
         secret: str,
         token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
         algorithm: str = TOKEN_ALGORITHM,
+        cache: object | None = None,
+        blacklist_prefix: str = "kb:token:blacklist:",
     ) -> None:
         """:param session: SQLAlchemy 会话。
         :param secret: JWT 签名密钥，由配置提供，禁止硬编码在代码里。
         :param token_ttl_seconds: 令牌有效期，默认 12 小时。
         :param algorithm: JWT 签名算法，默认 HS256。
+        :param cache: 可选缓存客户端（提供 get/set/delete），用于令牌黑名单（登出吊销）。
+        :param blacklist_prefix: 黑名单键前缀。
         """
         self._session = session
         self._secret = secret
         self._ttl = token_ttl_seconds
         self._algorithm = algorithm
+        self._cache = cache
+        self._blacklist_prefix = blacklist_prefix
 
     # ------------------------------------------------------------------ 认证
 
@@ -154,6 +161,7 @@ class AuthService:
             "username": user.username,
             "department_id": user.department_id,
             "role_ids": list(role_ids),
+            "jti": uuid.uuid4().hex,  # 唯一标识，登出吊销黑名单以此为准
             "iat": int(now.timestamp()),
             "exp": int((now + timedelta(seconds=self._ttl)).timestamp()),
         }
@@ -175,6 +183,45 @@ class AuthService:
         if "user_id" not in payload:
             raise TokenInvalid("令牌缺少 user_id")
         return payload
+
+    # ------------------------------------------------------------------ 吊销
+
+    def is_token_blacklisted(self, token: str) -> bool:
+        """令牌是否已被登出吊销（黑名单）。
+
+        缓存不可用时一律视为"未吊销"，避免把正常用户挡在门外。
+        """
+        if self._cache is None:
+            return False
+        try:
+            payload = self.decode_token(token)
+        except TokenInvalid:
+            return True  # 非法令牌本身就是无效的
+        jti = payload.get("jti")
+        if not jti:
+            return False
+        try:
+            return bool(self._cache.get(f"{self._blacklist_prefix}{jti}"))
+        except Exception:  # noqa: BLE001 - 查黑名单失败不应阻断请求
+            return False
+
+    def blacklist_token(self, token: str) -> None:
+        """把令牌加入吊销黑名单，TTL 设为其剩余有效期（过期后自动失效）。
+
+        :raise TokenInvalid: 令牌本身非法（前端传了坏令牌）。
+        """
+        if self._cache is None:
+            raise RuntimeError("未配置缓存，无法吊销令牌（请启用 Redis）")
+        payload = self.decode_token(token)
+        jti = payload.get("jti")
+        if not jti:
+            return
+        remaining = int(payload.get("exp", 0)) - int(datetime.now(timezone.utc).timestamp())
+        remaining = max(remaining, 1)
+        try:
+            self._cache.set(f"{self._blacklist_prefix}{jti}", "1", ttl=remaining)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"写入令牌黑名单失败：{exc}") from exc
 
     # ------------------------------------------------------------------ 权限
 
@@ -219,21 +266,30 @@ class AuthService:
 
     # ------------------------------------------------------------------ 重置
 
-    def reset_password(self, user_id: int, new_password: str | None = None) -> None:
+    def reset_password(self, user_id: int, new_password: str | None = None) -> str:
         """管理员重置用户口令（2.9.3 用户管理的"重置密码"）。
 
         :param user_id: 目标用户。
         :param new_password: 新口令；不传则重置为 :data:`INITIAL_PASSWORD`。
+        :return: 实际写入的新口令**明文** —— 只在这一次返回给管理员，
+            库里存的是哈希；不返回的话管理员无从得知该用什么口令登录。
         :raise LookupError: 用户不存在。
+        :raise ValueError: 显式传入的新口令为空串（会把账号锁死）。
         """
         # 第 1 步：取用户，不存在直接抛错
         user = self._session.get(User, user_id)
         if user is None:
             raise LookupError(f"用户不存在：id={user_id}")
-        # 第 2 步：写入新口令哈希（明文不入库）
-        user.password_hash = hash_password(new_password or INITIAL_PASSWORD)
-        # 第 3 步：提交
+        # 第 2 步：确定新口令。显式传空串属于误用，直接拒绝 ——
+        # 空口令哈希出来照样能存，但谁都登不上，是纯粹的坑
+        if new_password is not None and not new_password.strip():
+            raise ValueError("新口令不能为空")
+        effective = new_password or INITIAL_PASSWORD
+        # 第 3 步：写入新口令哈希（明文不入库）
+        user.password_hash = hash_password(effective)
+        # 第 4 步：提交并回传明文，供接口一次性展示
         self._session.commit()
+        return effective
 
     # ------------------------------------------------------------------ 内部
 

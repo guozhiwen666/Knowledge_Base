@@ -17,8 +17,15 @@ __all__ = [
     "LoginRequest",
     "UserCreateRequest",
     "UserUpdateRequest",
+    "UserResetPasswordRequest",
+    "DepartmentCreateRequest",
+    "DepartmentUpdateRequest",
+    "RoleCreateRequest",
+    "RoleUpdateRequest",
     "RolePermissionItem",
     "RolePermissionsRequest",
+    "UnitCreateRequest",
+    "UnitStatusRequest",
     "UnitPermissionItem",
     "UnitPermissionsRequest",
     "UnitDeleteRequest",
@@ -26,6 +33,7 @@ __all__ = [
     "CheckPermissionsRequest",
     "ChatRequest",
     "FaqReviewRequest",
+    "GapResolveRequest",
 ]
 
 
@@ -124,3 +132,91 @@ class FaqReviewRequest(BaseModel):
 
     action: str = Field(min_length=1, max_length=16)
     edited_answer: str | None = None
+
+
+# ---------------------------------------------------------------- 第 14 章 #2
+
+
+class UnitCreateRequest(BaseModel):
+    """``POST /api/knowledge/units``（第 14 章 #2 的手工新建）。
+
+    ``content`` 可空：允许先建一个只有标题的骨架，之后再补正文。
+    状态默认 ``active``（第 14 章 #13 的确认取值）。
+    """
+
+    title: str = Field(min_length=1, max_length=255)
+    content: str | None = None
+    category: str | None = Field(default=None, max_length=64)
+    summary: str | None = Field(default=None, max_length=1000)
+    status: str | None = None
+
+
+class UnitStatusRequest(BaseModel):
+    """``PUT /api/knowledge/units/{id}/status``（第 14 章 #1 的"仅状态流转"）。"""
+
+    status: str = Field(min_length=1, max_length=32)
+
+
+# ---------------------------------------------------------------- 第 14 章 #5
+
+
+class UserResetPasswordRequest(BaseModel):
+    """``POST /api/org/users/{id}/reset-password``（第 14 章 #5）。
+
+    不传 ``new_password`` 则重置为系统的初始口令。
+    """
+
+    new_password: str | None = Field(default=None, max_length=128)
+
+
+class DepartmentCreateRequest(BaseModel):
+    """``POST /api/org/departments``（第 14 章 #5）。"""
+
+    name: str = Field(min_length=1, max_length=128)
+    parent_id: int | None = None
+    leader_id: int | None = None
+    sort_order: int = 0
+
+
+class DepartmentUpdateRequest(BaseModel):
+    """``PUT /api/org/departments/{id}``：全部可选，未传即不改。"""
+
+    name: str | None = None
+    parent_id: int | None = None
+    leader_id: int | None = None
+    sort_order: int | None = None
+
+
+class RoleCreateRequest(BaseModel):
+    """``POST /api/org/roles``（第 14 章 #5）。"""
+
+    role_name: str = Field(min_length=1, max_length=64)
+    role_code: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=255)
+
+
+class RoleUpdateRequest(BaseModel):
+    """``PUT /api/org/roles/{id}``：全部可选，未传即不改。"""
+
+    role_name: str | None = None
+    role_code: str | None = None
+    description: str | None = None
+
+
+# ---------------------------------------------------------------- 第 14 章 #7
+
+
+class GapResolveRequest(BaseModel):
+    """``POST /api/settlement/knowledge-gaps/{id}/resolve``（第 14 章 #7）。
+
+    两种用法：
+
+    * 关联已有的知识单元 → 只传 ``unit_id``；
+    * 一键新建并关联 → 不传 ``unit_id``，标题缺省用缺口的问题模式，
+      正文缺省用样本提问拼出的骨架，管理员随后可在知识维护页补齐。
+    """
+
+    unit_id: int | None = Field(default=None, ge=1)
+    title: str | None = Field(default=None, max_length=255)
+    content: str | None = None
+    category: str | None = Field(default=None, max_length=64)

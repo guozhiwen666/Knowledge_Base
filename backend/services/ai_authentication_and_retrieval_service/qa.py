@@ -17,25 +17,29 @@
 2. :meth:`build_permission_notice` **只输出提示文案，不输出被拒单元的内容**
    （2.9.4：召回但无权限的知识单元，只需在回复或引用来源中明确告知缺失访问权限）。
 
-**刻意不做的事**（需求未写明，见第 14 章【待确认】）：
+**刻意不做的事**：
 
-* **历史对话列表**：2.9.3 要求展示，但 2.9.8 没有对应接口，
-  且按 4.7 应由 ``qa_access_logs`` 按 ``session_id`` 反查 —— 归属看板/日志读取侧，
-  本服务不提前实现无处可调的方法；
 * **LangGraph 状态与 SSE 事件映射**：``QAState``、Checkpointer、``astream_events``
   → SSE 的映射属于编排层与接口层职责（4.2 / 4.7 / 4.8），本服务只产出
   纯文本增量与结构化结果，不掺 SSE 协议细节。
+
+**多轮上下文（第 14 章 #12 确认值：保留 10 轮）**：历史轮次由调用方从
+``qa_access_logs`` 按 ``session_id`` 取出后经 ``history`` 参数传入，
+本服务只负责把它拼进 Prompt。**不读 Checkpointer** —— 进程内 Checkpointer
+重启即失，而问答日志一直都在，按日志取历史才是稳定可用的那一个。
 """
 
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import NamedTuple
 
 from sqlalchemy.orm import Session
 
 from services.ai_authentication_and_retrieval_service.retrieval import (
+    KEYWORD_MIN_SCORE,
+    VECTOR_MIN_SCORE,
     HybridRetriever,
     RecallOutcome,
     RecalledUnit,
@@ -50,20 +54,30 @@ __all__ = [
 ]
 
 # 流式生成函数的签名：输入已组装好的 Prompt，输出文本增量迭代器。
-# 不绑死任何厂商 SDK —— 模型选型属第 14 章【待确认】项，由调用方注入。
+# 不绑死任何厂商 SDK —— 由调用方注入具体实现。
 LlmStreamFn = Callable[[str], Iterator[str]]
 
 # Prompt 模板。需求未规定措辞，这里是可替换的占位模板：
 # 只做"给上下文 + 要求依据上下文回答"这两件必要的事，不额外限定语气与长度。
 PROMPT_TEMPLATE = """请依据下面提供的知识内容回答用户问题。
 若知识内容不足以回答，请直接说明依据不足，不要编造。
-
+{history}
 【知识内容】
 {context}
 
 【用户问题】
 {question}
 """
+
+# 历史对话段的模板。放在知识内容之前 —— 先交代"我们在聊什么"，
+# 再给"能用的材料"，模型更容易把追问理解成对前文的延续。
+HISTORY_TEMPLATE = """
+【历史对话】
+{lines}
+"""
+
+# 历史轮次里每条旧回答的截断长度。需求未规定，集中在此便于调整。
+HISTORY_ANSWER_MAX_CHARS = 300
 
 # 权限缺失提示文案。2.9.4 要求"明确告知缺失对应知识单元的访问权限"，
 # 因此文案里必须出现"访问权限"字样并点名单元标题。
@@ -99,6 +113,8 @@ class AiQaService:
         llm_stream: LlmStreamFn,
         *,
         default_top_k: int = 5,
+        vector_min_score: float = VECTOR_MIN_SCORE,
+        keyword_min_score: float = KEYWORD_MIN_SCORE,
     ) -> None:
         """:param session: SQLAlchemy 会话。
         :param permission_engine: 数据权限引擎（5.4），鉴权唯一入口。
@@ -106,10 +122,18 @@ class AiQaService:
             :data:`~ai_authentication_and_retrieval_service.retrieval.VectorSearchFn`。
         :param llm_stream: 流式生成函数，见 :data:`LlmStreamFn`。
         :param default_top_k: 召回条数默认值。
+        :param vector_min_score: 向量召回的相关性门槛（第 14 章 #8 的"召回相似度阈值"），
+            由接口层从配置读出后传入。
+        :param keyword_min_score: 关键字召回的相关性门槛（2-gram 命中率口径，
+            与相似度不是一个量纲，故独立给值）。
         """
         self._session = session
         self._permission_engine = permission_engine
         self._llm_stream = llm_stream
+        # 相关性门槛在这里存下，召回时作为参数传给检索器 ——
+        # 检索器的 recall() 允许逐次覆盖，便于同一进程内做不同口径的对比
+        self._vector_min_score = vector_min_score
+        self._keyword_min_score = keyword_min_score
         self._retriever = HybridRetriever(
             session, vector_search, default_top_k=default_top_k
         )
@@ -130,8 +154,17 @@ class AiQaService:
     def recall_candidates(
         self, question: str, top_k: int | None = None
     ) -> RecallOutcome:
-        """召回候选知识单元（A3，尚未鉴权）。"""
-        return self._retriever.recall(question, top_k)
+        """召回候选知识单元（A3，尚未鉴权）。
+
+        相关性门槛取自构造参数（第 14 章 #8），低于门槛的候选不会进入结果，
+        因此"召回列表为空"等价于"没有达到阈值的内容支撑"（11.4 的缺口口径）。
+        """
+        return self._retriever.recall(
+            question,
+            top_k,
+            vector_min_score=self._vector_min_score,
+            keyword_min_score=self._keyword_min_score,
+        )
 
     def filter_by_permission(
         self, user_id: int, candidates: Sequence[RecalledUnit]
@@ -204,7 +237,12 @@ class AiQaService:
 
     # ------------------------------------------------------------------ 生成
 
-    def stream_answer(self, question: str, context: str) -> Iterator[str]:
+    def stream_answer(
+        self,
+        question: str,
+        context: str,
+        history: Iterable[dict] | None = None,
+    ) -> Iterator[str]:
         """流式生成回答（5.5 / 4.8）。
 
         只产出纯文本增量，SSE 事件封装由接口层负责（``delta`` 事件）。
@@ -212,8 +250,37 @@ class AiQaService:
         :param question: 用户提问。
         :param context: :meth:`assemble_context` 的产出；为空表示没有可依据的知识，
             仍然交给模型按模板中的"依据不足"要求作答，而不是在这里替它编答案。
+        :param history: 历史轮次（每项形如 ``{"question": ..., "answer": ...}``），
+            由调用方按第 14 章 #12 保留最近 N 轮后传入。不传即单轮问答。
         """
-        # 第 1 步：按模板组装 Prompt
-        prompt = PROMPT_TEMPLATE.format(context=context, question=question)
+        # 第 1 步：按模板组装 Prompt。历史段为空时整段不出现，
+        # 不留一行空的【历史对话】去干扰模型
+        prompt = PROMPT_TEMPLATE.format(
+            history=self._format_history(history),
+            context=context,
+            question=question,
+        )
         # 第 2 步：委托注入的流式函数逐段产出
         yield from self._llm_stream(prompt)
+
+    @staticmethod
+    def _format_history(history: Iterable[dict] | None) -> str:
+        """把历史轮次拼成 Prompt 里的历史段。
+
+        长答案会被截断：历史的作用是让模型知道"前面聊到哪了"，
+        不是让它重读一遍全部旧回答 —— 全量塞进去会挤掉真正有用的知识上下文的预算。
+        """
+        # 第 1 步：过滤掉问或答为空的历史项
+        lines: list[str] = []
+        for turn in history or []:
+            asked = (turn or {}).get("question") or ""
+            answered = (turn or {}).get("answer") or ""
+            if not asked.strip():
+                continue
+            if len(answered) > HISTORY_ANSWER_MAX_CHARS:
+                answered = answered[:HISTORY_ANSWER_MAX_CHARS] + "…"
+            lines.append(f"用户：{asked}\n助手：{answered}")
+        if not lines:
+            return ""
+        # 第 2 步：套上小标题，前后各留一个换行
+        return HISTORY_TEMPLATE.format(lines="\n\n".join(lines))

@@ -1,0 +1,123 @@
+# =============================================================================
+# 知识库管理平台 · 本地/单机编排
+#
+# 用法：
+#   docker compose up -d
+#   # 初始化数据库（一次性）：
+#   docker compose exec app python -m scripts.init_db  # 见下方说明
+#
+# 组件：
+#   app    本平台后端（已挂载前端，监听 8000）
+#   mysql  MySQL 8.4（业务库）
+#   redis  Redis 7（FAQ 缓存 / 计数 / 会话 / 限流 / 令牌黑名单，生产必须）
+#   minio  MinIO（原始文件对象存储）
+#   milvus 见下方说明（本编排不内置 Milvus 集群，默认连外部实例）
+#
+# 重要：
+#   * Milvus 是重量级组件（依赖 etcd + 对象存储），本 compose 不内置。
+#     把 .env 的 MILVUS_URL 指向你的 Milvus 实例即可（与开发环境 192.168.10.10 一致）。
+#   * 真实密钥请放在宿主机 .env（已 gitignore），用 env_file 注入；切勿写死在本文。
+#   * 卷都声明了命名卷，数据持久化；删除容器不会丢数据（删卷才会）。
+# =============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kb-app
+    env_file:
+      - .env
+    environment:
+      # 容器内前端与后端同源，监听全部网卡
+      - APP_HOST=0.0.0.0
+      - APP_PORT=8000
+      - GUNICORN_WORKERS=4
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    volumes:
+      - ./storage:/app/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  mysql:
+    image: mysql:8.4
+    container_name: kb-mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_general_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-change_me}
+      MYSQL_DATABASE: ${DB_NAME:-knowledge_base}
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${DB_PASSWORD:-change_me}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: kb-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: kb-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-change_me}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-change_me}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+
+# =============================================================================
+# 初始化数据库（一次性，compose 外执行）：
+#   docker compose exec app sh -c \
+#     "uv run --no-sync python -c \"import pathlib,subprocess; \
+#      open('/tmp/i.sql','wb').write(open('scripts/init_db.sql','rb').read())\""
+#   或更简单：把 init_db.sql 通过 mysql 客户端导入到 mysql 服务。
+#   也可在 app 容器里执行：
+#   docker compose exec app python - <<'PY'
+#   import pathlib, sqlalchemy, core.config as c
+#   s = c.get_settings()
+#   sqlalchemy.text  # 见 scripts/init_db.sql
+#   PY
+#   推荐直接用 mysql 客户端：
+#   docker compose exec -T mysql mysql -uroot -p"$DB_PASSWORD" \
+#     < scripts/init_db.sql
+# =============================================================================

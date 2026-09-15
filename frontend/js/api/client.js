@@ -13,8 +13,9 @@
 
 import { getToken, clearSession } from '../core/store.js';
 
-/** 后端基址。部署到别的地址时只改这一行 */
-export const BASE_URL = 'http://127.0.0.1:8000';
+/** 后端基址。默认同源（由 index.html 注入的 window.KB_API_BASE 决定，通常为 ''）。
+ *  前后端不同源部署时，改 index.html 里的 window.KB_API_BASE 即可，不必改此文件。 */
+export const BASE_URL = (typeof window !== "undefined" && window.KB_API_BASE) || "";
 
 /** API 前缀（8.1：基址为 /api） */
 const API_PREFIX = '/api';
@@ -70,13 +71,18 @@ function unwrap(payload, status) {
  * @param {string} path   接口路径（不含基址）
  * @param {object} body   请求体；undefined 表示不带体
  * @param {object} query  查询参数，非空值才会拼进 URL
+ * @param {string[]} keepEmpty 需要保留空串的查询参数名。默认丢弃空串（避免发出
+ *   `?title=` 这类噪声，也让「不筛选」等价于「不传参」）；极少数接口把空串当作
+ *   一种**有效取值**（如 `GET /api/settlement/faqs` 的 `status=` 表示不限状态，
+ *   与不传时默认只看 published 是两种语义），调用方在此显式声明
  */
-export async function request(method, path, { body, query } = {}) {
+export async function request(method, path, { body, query, keepEmpty = [] } = {}) {
   // 第 1 步：拼查询串，过滤掉 null/undefined/空串，避免发出 `?title=undefined`
   const url = new URL(resolveUrl(path));
   if (query) {
     for (const [key, value] of Object.entries(query)) {
-      if (value === null || value === undefined || value === '') continue;
+      if (value === null || value === undefined) continue;
+      if (value === '' && !keepEmpty.includes(key)) continue;
       url.searchParams.set(key, value);
     }
   }
@@ -124,7 +130,7 @@ export async function request(method, path, { body, query } = {}) {
   return unwrap(payload, response.status);
 }
 
-export const get = (path, query) => request('GET', path, { query });
+export const get = (path, query, keepEmpty) => request('GET', path, { query, keepEmpty });
 export const post = (path, body) => request('POST', path, { body });
 export const put = (path, body) => request('PUT', path, { body });
 export const del = (path, body) => request('DELETE', path, { body });
@@ -134,8 +140,8 @@ export const del = (path, body) => request('DELETE', path, { body });
  *
  * 为什么单独走 XHR：9.4 要求导入中心有进度展示，而 fetch 目前拿不到
  * 上传阶段的进度事件；XMLHttpRequest 的 upload.onprogress 可以。
- * 注意这只是**上传字节**的进度，解析阶段的进度依赖的接口未在 8 章列出，
- * 页面上另有「待接口确认」占位说明。
+ * 注意这只是**上传字节**的进度 —— 解析阶段的进度由
+ * `GET /api/knowledge/import/progress` 轮询取得（见 api/knowledge.js）。
  *
  * @param {string} path
  * @param {FormData} formData

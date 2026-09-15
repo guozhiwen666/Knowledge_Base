@@ -34,6 +34,10 @@ class QAState(TypedDict, total=False):
     # ---- 请求入参（来自 POST /api/ai/chat/stream）----
     question: str
     session_id: str
+    # 多轮上下文（第 14 章 #12：保留最近 N 轮）。由接口层按 session_id 从
+    # qa_access_logs 取出后填入 —— 不依赖 Checkpointer，因为进程内 Checkpointer
+    # 重启即失，而问答日志一直都在
+    history: list[dict]
 
     # ---- A1 产出：登录态与身份 ----
     auth_ok: bool

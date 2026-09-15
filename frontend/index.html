@@ -31,6 +31,10 @@
   <!-- 模态框容器（数据权限配置弹窗、表单弹窗复用） -->
   <div id="modal-host"></div>
 
+  <!-- 后端基址：默认同源（空串 → 走当前域名，适配后端挂载或 nginx 同源部署）。
+       若前后端不同源，部署时把该行改为 'https://api.example.com' 即可，无需改业务代码。 -->
+  <script>window.KB_API_BASE = window.KB_API_BASE || '';</script>
+
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

@@ -152,11 +152,21 @@ def build_qa_graph(session, container, *, top_k: int = 5, checkpointer=None):
     :param top_k: 召回条数。
     :param checkpointer: 会话持久化器；不传则用进程内的 ``InMemorySaver``。
         Redis Checkpointer 需要额外安装 ``langgraph-checkpoint-redis``，
-        本环境未安装，因此默认进程内保存（重启即失，见 4.7 的配置项）。
+        本环境未安装，因此默认进程内保存（重启即失）。
+
+        **多轮上下文不依赖它**：第 14 章 #12 的"保留 10 轮"由接口层从
+        ``qa_access_logs`` 按 ``session_id`` 取出后填进状态（见 ``QAState.history``），
+        Checkpointer 只承担图自身的断点续跑，重启即失也不影响对话连续性。
     :return: 已编译的图，可用 ``.stream(state, stream_mode="custom")`` 驱动。
     """
-    # 第 1 步：组装服务。全部依赖注入，图本身不 new 任何连接
-    permission_engine = DataPermissionEngine(session)
+    # 第 1 步：组装服务。全部依赖注入，图本身不 new 任何连接。
+    # 权限引擎与召回门槛都取配置值（第 14 章 #8 / #9 / #10）
+    settings = getattr(container, "settings", None)
+    permission_engine = DataPermissionEngine(
+        session,
+        inherit_departments=getattr(settings, "dept_permission_inherit", True),
+        admin_role_codes=getattr(settings, "admin_role_codes", ()),
+    )
     vector_search = build_vector_search(container)
     llm_stream = container.llm_stream
 
@@ -166,6 +176,7 @@ def build_qa_graph(session, container, *, top_k: int = 5, checkpointer=None):
         vector_search,
         llm_stream if llm_stream is not None else (lambda _prompt: iter([GAP_ANSWER_TEXT])),
         default_top_k=top_k,
+        vector_min_score=getattr(settings, "recall_similarity_threshold", 0.5),
     )
     faq_cache = FaqCacheService(session, container.cache, container.embedding)
     dashboard = DashboardService(session, container.cache)

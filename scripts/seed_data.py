@@ -58,8 +58,12 @@ from services.authentication_and_authorization_module.passwords import (  # noqa
     hash_password,
 )
 
-# 演示口令。仅用于本地演示，部署前必须替换
-DEMO_PASSWORD = "123456"
+# 演示口令。仅用于本地演示。
+# 部署前必须：① 改为强口令；② 或直接删除演示账号（见下方 DEMO_USERS）。
+# 可通过环境变量 KB_DEMO_PASSWORD 覆盖（不传默认 123456，仅供本地演示）。
+import os
+
+DEMO_PASSWORD = os.getenv("KB_DEMO_PASSWORD", "123456")
 
 # 权限码。取自文档 6.1 的权限编码表（menu / operation / ai 三类）
 PERMISSIONS_BY_ROLE = {

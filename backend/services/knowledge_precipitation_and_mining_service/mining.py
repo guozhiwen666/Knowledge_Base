@@ -49,9 +49,13 @@ ClusterFn = Callable[[Sequence[str]], Sequence[int]]
 # 挖掘窗口默认天数。需求未规定回溯范围，集中在此便于调整。
 DEFAULT_WINDOW_DAYS = 30
 
-# 推荐 FAQ 的触发阈值（11.3"频次达到阈值"）。具体数值属第 14 章【待确认】，
-# 这里给默认值并暴露为构造参数。
-DEFAULT_MIN_FREQUENCY = 3
+# 推荐 FAQ 的触发阈值（11.3"频次达到阈值"）。第 14 章 #8 的确认值为 50。
+#
+# 这个量级意味着"偶发提问不会变成推荐 FAQ"—— 只有真正反复被问到的才值得
+# 沉淀成标准问答。演示数据因此需要刻意造出足够频次（见 ``scripts/seed_data.py``）。
+# 实际运行值由配置层的 ``FAQ_MIN_FREQUENCY`` 经 ``SettlementService`` 注入，
+# 这里只作为"未配置时的默认"。
+DEFAULT_MIN_FREQUENCY = 50
 
 # 缺口样本保留条数上限，避免一条模式攒下上千条样本把 JSON 列撑爆
 MAX_SAMPLE_QUESTIONS = 20

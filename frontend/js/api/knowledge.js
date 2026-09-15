@@ -10,9 +10,10 @@
  *   12. `DELETE /api/knowledge/units`                     —— 批量删除
  *   13. `POST   /api/knowledge/check-permissions`         —— 四维鉴权（AI 链路核心接口）
  *
- * 明确不在本文件内的方法（8 章没有这些接口）：
- *   - 手工新建知识单元（2.9.3 有需求但 8.4 未列出接口）
- *   - 解析进度查询（9.4 要求轮询但 8.4 未列出接口）
+ * 并封装第 14 章 #1 / #2 / #3 补齐的三个接口：
+ *   `POST /api/knowledge/units`                手工新建知识单元
+ *   `PUT  /api/knowledge/units/{id}/status`    状态流转（版本管理确认为「仅状态流转」）
+ *   `GET  /api/knowledge/import/progress`      解析任务进度轮询
  */
 
 import { del, get, post, put, upload } from './client.js';
@@ -23,11 +24,11 @@ import { del, get, post, put, upload } from './client.js';
  * 批量导入（8.4 POST，multipart/form-data）。
  *
  * 请求字段：`files`（可多个）、`category`（可选默认分类）。
- * 响应字段：`{ accepted: [{file_name, unit_id, unit_code, chunk_count}],
- *              rejected: [{file_name, reason}] }`
+ * 响应字段：`{ accepted: [{file_name, task_id}], rejected: [{file_name, reason}] }`
  *
- * 注意：服务端是「同步解析 + 返回结果」，一次请求就返回了终态；
- * 9.4 要求的解析进度轮询依赖的接口不在 8 章，页面上另有占位说明。
+ * **解析已改为后台异步**：本请求只做接收与扩展名校验，因此响应很快返回、
+ * 且只给出任务标识；入库结果（unit_id / unit_code / chunk_count）要从
+ * `getImportProgress()` 轮询取得。rejected 的 reason 为 `unsupported_format`。
  *
  * @param {File[]} files 待导入文件
  * @param {string} category 统一分类，可为空
@@ -43,6 +44,22 @@ export function importDocuments(files, category, onProgress) {
   return upload('/api/knowledge/import', formData, onProgress);
 }
 
+/**
+ * 解析任务进度查询（第 14 章 #3）。
+ *
+ * @param {string[]} taskIds 导入响应里 accepted[].task_id
+ * @returns {Promise<{items:Array, missing_task_ids:string[], all_finished:boolean}>}
+ *   items 元素：{ task_id, file_name, status, stage, percent,
+ *                 unit_id, unit_code, chunk_count, reason }
+ *   status ∈ queued | running | completed | failed（后两者为终态）
+ *   stage  ∈ queued | starting | parsing | chunking | embedding | indexing | completed | failed
+ *   percent 为 0~100
+ */
+export function getImportProgress(taskIds) {
+  const ids = (Array.isArray(taskIds) ? taskIds : [taskIds]).filter(Boolean);
+  return get('/api/knowledge/import/progress', { task_ids: ids.join(',') });
+}
+
 /* ------------------------------------------------------------------ 列表 */
 
 /**
@@ -55,6 +72,20 @@ export function importDocuments(files, category, onProgress) {
 export function listUnits(params = {}) {
   const { title, category, status, page = 1, page_size = 10 } = params;
   return get('/api/knowledge/units', { title, category, status, page, page_size });
+}
+
+/**
+ * 手工新建知识单元（第 14 章 #2）。
+ *
+ * 正文非空时后端会同步切片并写入向量库（否则新建出来的单元检索不到），
+ * 因此该接口依赖 MinIO / Milvus 就绪，未就绪时返回 503。
+ *
+ * @param {object} payload { title, content?, category?, summary?, status? }
+ * @returns {Promise<{id:number, unit_code:string, title:string,
+ *   category:string|null, status:string, created_at:string}>}
+ */
+export function createUnit(payload) {
+  return post('/api/knowledge/units', payload);
 }
 
 /* ------------------------------------------------------------------ 详情 */
@@ -78,6 +109,18 @@ export function getUnit(unitId) {
 export function updateUnit(unitId, payload) {
   return put(`/api/knowledge/units/${unitId}`, payload);
 }
+
+/**
+ * 知识单元状态流转（第 14 章 #1：版本管理确认为「仅状态流转」）。
+ *
+ * @param {number} unitId
+ * @param {string} status 后端按白名单校验，目前只接受 `active`，其余取值返回 422
+ * @returns {Promise<{id:number, status:string, updated_at:string}>}
+ */
+export function updateUnitStatus(unitId, status) {
+  return put(`/api/knowledge/units/${unitId}/status`, { status });
+}
+
 
 /**
  * 配置知识单元的数据权限（8.4 POST，全量覆盖）。

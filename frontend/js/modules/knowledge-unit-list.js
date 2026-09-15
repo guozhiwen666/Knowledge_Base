@@ -2,23 +2,24 @@
  * 知识维护与导入 · 知识单元列表
  *
  * 从 knowledge-module.js 拆出（该文件只保留路由转发）。
- * 表格与分页的模板拆在 unit-list-table.js。
+ * 表格与分页的模板拆在 unit-list-table.js，新建弹窗拆在 knowledge-unit-form.js。
  *
- * 接口落位（严格限定在 8 章列出的接口内）：
+ * 接口落位：
  *   `GET    /api/knowledge/units`                   列表分页查询（title / category / status / page / page_size）
+ *   `POST   /api/knowledge/units`                   手工新建（第 14 章 #2）
  *   `GET    /api/knowledge/units/{id}`              取详情，用于权限弹窗回填
+ *   `PUT    /api/knowledge/units/{id}/status`       状态流转（第 14 章 #1，目前只接受 active）
  *   `POST   /api/knowledge/units/{id}/permissions`  数据权限全量覆盖
  *   `DELETE /api/knowledge/units`                   批量删除
- *
- * **明确缺失、页面用占位说明的部分**：手工新建知识单元接口（8 章未列出）。
  */
 
-import { listUnits, deleteUnits, getUnit } from '../api/knowledge.js';
+import { listUnits, deleteUnits, getUnit, updateUnitStatus } from '../api/knowledge.js';
 import { hasPermission } from '../core/store.js';
 import { navigate } from '../core/router.js';
-import { el, esc, $, toast, confirmDialog, pendingBlock, emptyState, loadingState, fmtNumber } from '../core/dom.js';
+import { el, esc, $, toast, confirmDialog, emptyState, loadingState, fmtNumber } from '../core/dom.js';
 import { openPermissionDialog } from './permission-dialog.js';
 import { renderUnitTableHtml, renderPagerHtml } from './unit-list-table.js';
+import { openUnitCreateModal } from './knowledge-unit-form.js';
 
 /** #/knowledge/units 页面渲染 */
 export function renderUnitList() {
@@ -42,11 +43,15 @@ export function renderUnitList() {
             <button class="btn btn-primary" type="button" data-role="search">查询</button>
             <button class="btn" type="button" data-role="reset">重置</button>
           </div>
-          <button class="btn" type="button" data-role="to-import">去导入中心</button>
+          <div class="row">
+            <button class="btn btn-primary" type="button" data-role="create">手工新建</button>
+            <button class="btn" type="button" data-role="to-import">去导入中心</button>
+          </div>
         </div>
         <div class="field-hint mt8">
           状态取值口径：<code>knowledge_units.status</code> 的枚举属第 14 章【待确认】项（文档标注默认 active），
-          故此处同时列出 active / archived / draft 三个候选值，查询为精确匹配。
+          故此处同时列出 active / archived / draft 三个候选值，查询为精确匹配；
+          状态流转接口目前只接受 active 一个取值。
         </div>
       </div>
 
@@ -61,21 +66,19 @@ export function renderUnitList() {
         <div data-role="table">${loadingState()}</div>
         <div class="pager" data-role="pager"></div>
       </div>
-
-      <div class="card">
-        <div class="card-title">手工新建知识单元</div>
-        ${pendingBlock(
-          '手工新建知识单元',
-          '2.9.3 的知识维护包含「新增」，但 8.4 只列出了导入、列表、详情、更新、批量删除五个接口，没有手工新建接口。因此本页不提供新建按钮，新增内容请走导入中心上传文件。',
-          'POST /api/knowledge/units（8 章未列出）',
-        )}
-      </div>
     </div>
   `);
 
   // 第 2 步：按钮级权限（6.1 操作权限）
+  const canCreate = hasPermission('knowledge:unit:create');
   const canUpdate = hasPermission('knowledge:unit:update');
   const canDelete = hasPermission('knowledge:unit:delete');
+
+  const createBtn = $('[data-role="create"]', container);
+  if (!canCreate) {
+    createBtn.disabled = true;
+    createBtn.title = '需要 knowledge:unit:create 权限';
+  }
 
   const state = { page: 1, page_size: 10, total: 0, items: [], selected: new Set() };
   const tableBox = $('[data-role="table"]', container);
@@ -173,6 +176,18 @@ export function renderUnitList() {
       return;
     }
 
+    if (btn.dataset.act === 'activate') {
+      // 状态流转（第 14 章 #1）。后端目前只接受 active，因此这里只有一个方向
+      try {
+        await updateUnitStatus(id, 'active');
+        toast('已置为 active', 'success');
+        load();
+      } catch (error) {
+        toast(error.message || '状态流转失败', 'error');
+      }
+      return;
+    }
+
     if (btn.dataset.act === 'del') {
       const ok = await confirmDialog(
         `确认删除知识单元「${(unit && unit.title) || id}」？将同步删除其数据权限记录与向量切片。`,
@@ -221,7 +236,16 @@ export function renderUnitList() {
     });
   });
 
-  // 第 6 步：批量删除
+  // 第 6 步：手工新建（弹窗内提交 POST /api/knowledge/units），成功后回到第一页看新单元
+  createBtn.addEventListener('click', () => {
+    if (!canCreate) return;
+    openUnitCreateModal(() => {
+      state.page = 1;
+      load();
+    });
+  });
+
+  // 第 7 步：批量删除
   batchBtn.addEventListener('click', async () => {
     if (!state.selected.size) return;
     const ok = await confirmDialog(`确认删除选中的 ${state.selected.size} 个知识单元？`, '批量删除');
@@ -235,7 +259,7 @@ export function renderUnitList() {
     }
   });
 
-  // 第 7 步：首次加载
+  // 第 8 步：首次加载
   load();
   return container;
 }

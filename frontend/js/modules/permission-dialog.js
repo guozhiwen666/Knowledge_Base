@@ -6,19 +6,22 @@
  * `POST /api/knowledge/units/{id}/permissions`（8.4）的 `permissions` 数组。
  *
  * 数据来源：
- *   - 部门多选树 -> `GET /api/org/departments`（8.3，已列出）
- *   - 角色多选   -> `GET /api/org/roles`（8.3，已列出）
- *   - 人员多选   -> **无接口**。8 章没有用户列表接口，因此该组渲染为禁用态
- *                   并在弹窗内明确标注「待接口确认」，不自造端点、不用假数据充数。
+ *   - 部门多选树 -> `GET /api/org/departments`（8.3）
+ *   - 角色多选   -> `GET /api/org/roles`（8.3）
+ *   - 人员多选   -> `GET /api/org/users`（第 14 章 #5 补齐）
+ *     注意该接口要求 `menu:org`：知识管理员按 2.9.2 可能没有这个菜单权限，
+ *     此时人员组会退化为只读展示「库内已有的人员实体」，保存时按原值保留 ——
+ *     全量覆盖式保存最怕的就是「看不见的项被静默清空」。
  *
  * 已配置权限的回填来源：`GET /api/knowledge/units/{id}` 响应里的
  * `permissions[{target_type, target_id, target_name}]`（8.4）。
  */
 
-import { listDepartments, listRoles } from '../api/org.js';
+import { listDepartments, listRoles, listUsers } from '../api/org.js';
 import { setUnitPermissions, checkPermissions } from '../api/knowledge.js';
 import { getUser } from '../core/store.js';
-import { esc, $, toast, openModal, fmtNumber } from '../core/dom.js';
+import { esc, $, toast, openModal } from '../core/dom.js';
+import { renderDeptTree, renderRoleList, renderUserList, refreshCounts } from './permission-selects.js';
 
 /** 四维实体的中文名与说明（6.2 数据权限四维模型） */
 const TARGET_META = {
@@ -38,10 +41,19 @@ const TARGET_META = {
  *   onSaved     保存成功回调
  */
 export async function openPermissionDialog({ unitId, unitTitle, assigned = [], onSaved }) {
-  // 第 1 步：并行拉取部门树与角色列表。任一失败则降级为空列表，弹窗仍然可用
-  const [departments, roles] = await Promise.all([
+  // 第 1 步：并行拉取部门树、角色列表与用户列表。任一失败则降级为空列表，弹窗仍然可用
+  // 用户列表要求 menu:org，无该权限时这里会失败 —— 用 usersLoaded 记住这件事，
+  // 保存时据此决定「人员组」是按勾选提交还是按原值保留
+  let usersLoaded = true;
+  const [departments, roles, users] = await Promise.all([
     listDepartments().catch(() => []),
     listRoles().catch(() => []),
+    listUsers({ page: 1, page_size: 100 })
+      .then((data) => (data && data.items) || [])
+      .catch(() => {
+        usersLoaded = false;
+        return [];
+      }),
   ]);
 
   // 第 2 步：把已配置权限按维度拆开，用于回填
@@ -95,27 +107,13 @@ export async function openPermissionDialog({ unitId, unitTitle, assigned = [], o
       <div class="perm-group-body" data-role="role-list"></div>
     </div>
 
-    <!-- 第 4 组：人员多选（接口缺失，占位） -->
+    <!-- 第 4 组：人员多选 -->
     <div class="perm-group">
       <div class="perm-group-head">
         <span>${esc(TARGET_META.user.label)} <span class="tag">user</span></span>
-        <span class="tag tag-warn">待接口确认</span>
+        <span class="mute-sm" data-role="user-count"></span>
       </div>
-      <div class="perm-group-body">
-        ${
-          assignedUserIds.length
-            ? `<div class="field-hint mb8">该单元库内已配置 ${fmtNumber(assignedUserIds.length)} 个人员实体（目标 ID：${assignedUserIds
-                .map((id) => esc(id))
-                .join('、')}）。保存时会原样保留，但在本弹窗内无法增删。</div>`
-            : ''
-        }
-        <div class="pending-block">
-          <span class="pending-title">人员多选：该功能待接口确认</span>
-          8 章没有提供用户列表接口，无法列出可选人员，因此人员多选组件不可用。
-          <div class="mute-sm mt8">缺失数据源：<code>GET /api/org/users</code>（8 章未列出）</div>
-          ${assignedUserIds.length ? '<div class="mute-sm mt8">已存在的人员实体在保存时按原值保留，不会丢失。</div>' : ''}
-        </div>
-      </div>
+      <div class="perm-group-body" data-role="user-list"></div>
     </div>
 
     <!-- 保存前自检：复用 8.4 的鉴权接口，确认当前登录人自己对哪些单元可见 -->
@@ -139,9 +137,10 @@ export async function openPermissionDialog({ unitId, unitTitle, assigned = [], o
     bodyHtml: html,
     okText: '保存',
     onMount: (body) => {
-      // 第 3 步：渲染部门树与角色多选
+      // 第 3 步：渲染部门树、角色多选与人员多选
       $('[data-role="dept-tree"]', body).innerHTML = renderDeptTree(departments, assignedDeptIds);
       $('[data-role="role-list"]', body).innerHTML = renderRoleList(roles, assignedRoleIds);
+      $('[data-role="user-list"]', body).innerHTML = renderUserList(users, assignedUserIds, usersLoaded);
       refreshCounts(body);
 
       // 第 4 步：勾选变化时刷新计数
@@ -187,10 +186,17 @@ export async function openPermissionDialog({ unitId, unitTitle, assigned = [], o
         permissions.push({ target_type: 'role', target_id: Number(box.value) });
       });
 
-      // 第 7 步：人员实体在弹窗内不可编辑，按原值原样带上，避免保存时把它们删掉
-      assignedUserIds.forEach((id) => {
-        permissions.push({ target_type: 'user', target_id: Number(id) });
-      });
+      // 第 7 步：人员实体。列表没拉到时（缺 menu:org）按原值保留 ——
+      // 全量覆盖式保存下，把看不见的项当成「已取消」会把既有授权清空
+      if (usersLoaded) {
+        body.querySelectorAll('input[name="user"]:checked').forEach((box) => {
+          permissions.push({ target_type: 'user', target_id: Number(box.value) });
+        });
+      } else {
+        assignedUserIds.forEach((id) => {
+          permissions.push({ target_type: 'user', target_id: Number(id) });
+        });
+      }
 
       try {
         await setUnitPermissions(unitId, permissions);
@@ -204,53 +210,6 @@ export async function openPermissionDialog({ unitId, unitTitle, assigned = [], o
       }
     },
   });
-}
-
-/** 渲染部门多选树（递归，带 checkbox） */
-function renderDeptTree(nodes, checkedIds) {
-  if (!nodes || !nodes.length) {
-    return '<div class="mute-sm">暂无部门数据（GET /api/org/departments 未返回内容）</div>';
-  }
-  const render = (list, depth) =>
-    list
-      .map(
-        (node) => `
-      <div>
-        <label class="check-item" style="padding-left:${depth * 18}px">
-          <input type="checkbox" name="dept" value="${esc(node.id)}" ${checkedIds.has(String(node.id)) ? 'checked' : ''} />
-          <span>${esc(node.name || '-')}<span class="mute-sm mono"> #${esc(node.id)}</span></span>
-        </label>
-        ${node.children && node.children.length ? render(node.children, depth + 1) : ''}
-      </div>`,
-      )
-      .join('');
-  return render(nodes, 0);
-}
-
-/** 渲染角色多选（平铺） */
-function renderRoleList(roles, checkedIds) {
-  if (!roles || !roles.length) {
-    return '<div class="mute-sm">暂无角色数据（GET /api/org/roles 未返回内容）</div>';
-  }
-  return `<div class="check-grid">${roles
-    .map(
-      (role) => `
-    <label class="check-item">
-      <input type="checkbox" name="role" value="${esc(role.id)}" ${checkedIds.has(String(role.id)) ? 'checked' : ''} />
-      <span>${esc(role.role_name || role.role_code)}<span class="mute-sm mono"> #${esc(role.id)}</span></span>
-    </label>`,
-    )
-    .join('')}</div>`;
-}
-
-/** 刷新部门 / 角色的已选计数 */
-function refreshCounts(body) {
-  const deptCount = body.querySelectorAll('input[name="dept"]:checked').length;
-  const roleCount = body.querySelectorAll('input[name="role"]:checked').length;
-  const deptBox = $('[data-role="dept-count"]', body);
-  const roleBox = $('[data-role="role-count"]', body);
-  if (deptBox) deptBox.textContent = deptCount ? `已选 ${deptCount} 个部门` : '未选择';
-  if (roleBox) roleBox.textContent = roleCount ? `已选 ${roleCount} 个角色` : '未选择';
 }
 
 /** 供知识列表页显示权限摘要时复用（当后端未返回 permission_summary 时的本地兜底） */

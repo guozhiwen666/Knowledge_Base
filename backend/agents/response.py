@@ -59,9 +59,14 @@ class AnswerAgent:
         authorized = list(state.get("authorized_units") or [])
         context = self._qa.assemble_context(authorized)
 
-        # 第 4 步：流式生成并逐段下发 delta 事件
+        # 第 4 步：流式生成并逐段下发 delta 事件。历史轮次由接口层按
+        # 第 14 章 #12 填入 state，这里只负责透传，不做取舍
         collected: list[str] = []
-        for piece in self._qa.stream_answer(state.get("question") or "", context):
+        for piece in self._qa.stream_answer(
+            state.get("question") or "",
+            context,
+            history=state.get("history") or [],
+        ):
             collected.append(piece)
             emit_delta(piece)
 

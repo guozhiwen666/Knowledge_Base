@@ -12,6 +12,7 @@ Redis 可用就用 Redis，不可用就退回进程内字典，并在启动日�
 from __future__ import annotations
 
 import threading
+import time
 
 from core.config import Settings
 
@@ -30,33 +31,50 @@ class MemoryCache:
     """
 
     def __init__(self) -> None:
-        self._data: dict[str, str] = {}
+        # 值为 ``(字符串, 过期时间戳|None)``；None 表示永不过期
+        self._data: dict[str, tuple[str, float | None]] = {}
         self._lock = threading.Lock()
 
     def get(self, key: str) -> str | None:
-        """读一个键，不存在返回 ``None``。"""
+        """读一个键，不存在或已过期返回 ``None``（过期项顺手清除）。"""
         with self._lock:
-            return self._data.get(key)
+            item = self._data.get(key)
+            if item is None:
+                return None
+            value, expires_at = item
+            if expires_at is not None and expires_at <= time.monotonic():
+                self._data.pop(key, None)
+                return None
+            return value
 
-    def set(self, key: str, value: str) -> None:
-        """写一个键。"""
+    def set(self, key: str, value: str, ttl: int | None = None) -> None:
+        """写一个键；``ttl`` 为秒，``None`` 表示不过期。"""
         with self._lock:
-            self._data[key] = value
+            expires_at = (time.monotonic() + ttl) if ttl else None
+            self._data[key] = (value, expires_at)
 
     def delete(self, key: str) -> None:
         """删一个键，不存在也不报错。"""
         with self._lock:
             self._data.pop(key, None)
 
-    def incrby(self, key: str, amount: int) -> int:
-        """原子自增；键不存在按 0 起算。非数字值按 0 起算，避免脏数据把计数打挂。"""
+    def incrby(self, key: str, amount: int, ttl: int | None = None) -> int:
+        """原子自增；键不存在按 0 起算。非数字值按 0 起算，避免脏数据把计数打挂。
+
+        ``ttl`` 仅在键**首次创建**时生效（已存在的键保留原过期时间）。
+        """
         with self._lock:
+            item = self._data.get(key)
             try:
-                current = int(self._data.get(key, 0))
+                current = int(item[0]) if item is not None else 0
             except (TypeError, ValueError):
                 current = 0
             current += int(amount)
-            self._data[key] = str(current)
+            if item is None:
+                expires_at = (time.monotonic() + ttl) if ttl else None
+            else:
+                expires_at = item[1]
+            self._data[key] = (str(current), expires_at)
             return current
 
     def clear(self) -> None:
@@ -88,17 +106,20 @@ class RedisCache:
         """读一个键。"""
         return self._client.get(key)
 
-    def set(self, key: str, value: str) -> None:
-        """写一个键（不设 TTL：FAQ 缓存靠 5.8 的失效逻辑重建，不靠过期）。"""
-        self._client.set(key, value)
+    def set(self, key: str, value: str, ttl: int | None = None) -> None:
+        """写一个键；``ttl`` 为秒，``None`` 表示不过期。"""
+        self._client.set(key, value, ex=ttl)
 
     def delete(self, key: str) -> None:
         """删一个键。"""
         self._client.delete(key)
 
-    def incrby(self, key: str, amount: int) -> int:
-        """原子自增，返回自增后的值。"""
-        return int(self._client.incrby(key, int(amount)))
+    def incrby(self, key: str, amount: int, ttl: int | None = None) -> int:
+        """原子自增并返回自增后的值；``ttl`` 仅在键首次创建时设置过期。"""
+        result = int(self._client.incrby(key, int(amount)))
+        if ttl is not None:
+            self._client.expire(key, ttl)
+        return result
 
 
 def _port_reachable(host: str, port: int, timeout: float = 1.0) -> bool:

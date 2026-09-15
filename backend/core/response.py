@@ -24,6 +24,7 @@ __all__ = [
     "PermissionDeniedError",
     "NotFoundError",
     "BadRequestError",
+    "TooManyRequestsError",
     "ok",
     "fail",
     "register_exception_handlers",
@@ -66,6 +67,13 @@ class BadRequestError(AppError):
 
     def __init__(self, message: str = "参数错误") -> None:
         super().__init__(message, code=422, http_status=422)
+
+
+class TooManyRequestsError(AppError):
+    """请求过于频繁（登录限流 / 账号锁定），对应 429。"""
+
+    def __init__(self, message: str = "请求过于频繁，请稍后再试") -> None:
+        super().__init__(message, code=429, http_status=429)
 
 
 def ok(data: Any = None, message: str = "ok") -> dict:

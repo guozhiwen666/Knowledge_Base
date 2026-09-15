@@ -6,7 +6,9 @@
     待审核 FAQ 推荐列表（8.7）      -> :meth:`SettlementService.list_recommendations`
     FAQ 审核流转（8.7）             -> :meth:`SettlementService.review_faq`
     知识缺口列表（8.7）             -> :meth:`SettlementService.list_knowledge_gaps`
-    挖掘算法本身                    -> :mod:`knowledge_precipitation_and_mining_service.mining`
+    已发布 FAQ 库与下线（#6）        -> ``faq_library.FaqLibraryService``
+    知识缺口状态流转（#7）           -> ``gaps.KnowledgeGapService``
+    挖掘算法本身                    -> ``mining.QuestionMiner``
 
 **审核通过为什么要联动缓存**：11.3 规定 ``approve`` 时除了改状态，还要"写缓存"，
 缓存写入属 5.8 的 FAQ 缓存服务职责，因此本服务持有其引用并在通过时调用；
@@ -16,14 +18,9 @@
 万一缓存写入失败，回滚数据库状态并主动让缓存失效，避免出现
 "缓存里已经是新答案、库里还是待审核"这种两边不一致的状态。
 
-**刻意不做的事**：
-
-* **建议答案生成**：11.3 只规定了审核时可用 ``edited_answer`` 覆盖答案，
-  没有规定挖掘阶段如何生成建议答案，因此推荐项的 ``answer`` 留空，
-  由管理员在审核界面填写；列表里的 ``suggested_answer`` 因此可能是 ``null``；
-* **缺口状态流转（"一键创建关联知识单元补全"）**：11.4 写了 ``unresolved →
-  resolved`` 并回写 ``resolved_unit_id``，但 2.9.3 所需的对应接口未在 2.9.8 中列出
-  （第 14 章【待确认】）。没有对外入口就不实现无处可调的方法。
+**频次阈值的来源**：11.3 的"频次达到阈值"取值见第 14 章 #8（确认值 50），
+由接口层从配置读出后经构造参数传入，不写死在模块里 ——
+演示数据达不到 50 次时，改 `.env` 即可，不必改代码。
 """
 
 from __future__ import annotations
@@ -37,6 +34,12 @@ from sqlalchemy.orm import Session
 from models import Faq, KnowledgeGap, QaAccessLog
 from models.enums import FaqSourceType, FaqStatus
 from services.FAQ_cache_ervice.faq_cache import FaqCacheService
+from services.knowledge_precipitation_and_mining_service.faq_library import (
+    FaqLibraryService,
+)
+from services.knowledge_precipitation_and_mining_service.gaps import (
+    KnowledgeGapService,
+)
 from services.knowledge_precipitation_and_mining_service.mining import (
     DEFAULT_MIN_FREQUENCY,
     DEFAULT_WINDOW_DAYS,
@@ -73,15 +76,19 @@ class SettlementService:
         min_frequency: int = DEFAULT_MIN_FREQUENCY,
     ) -> None:
         """:param session: SQLAlchemy 会话。
-        :param faq_cache: FAQ 缓存服务（5.8），审核通过 / 驳回时联动。
+        :param faq_cache: FAQ 缓存服务（5.8），审核通过 / 驳回 / 下线时联动。
         :param cluster_fn: 聚类函数，透传给挖掘器。
-        :param min_frequency: 推荐 FAQ 的频次阈值，透传给挖掘器。
+        :param min_frequency: 推荐 FAQ 的频次阈值（第 14 章 #8 确认值 50），
+            由接口层从配置读出后传入。
         """
         self._session = session
         self._faq_cache = faq_cache
         self._miner = QuestionMiner(
             session, cluster_fn=cluster_fn, min_frequency=min_frequency
         )
+        # 两个协作者：README 式的门面结构 —— 对外入口在本类，实现就近在协作者
+        self._faq_library = FaqLibraryService(session, faq_cache)
+        self._gaps = KnowledgeGapService(session)
 
     # ------------------------------------------------------------------ 挖掘
 
@@ -161,6 +168,7 @@ class SettlementService:
         """知识缺口列表（``GET /api/settlement/knowledge-gaps``）。
 
         按提问频次降序（7.4 的 ``idx_gap_count`` 正是服务这个查询）。
+        返回 ``resolved_unit_id`` 供前端展示"已由哪个单元补全"。
         """
         rows = (
             self._session.execute(
@@ -178,9 +186,18 @@ class SettlementService:
                 "ask_count": gap.ask_count,
                 "last_asked_at": gap.last_asked_at,
                 "status": gap.status,
+                "resolved_unit_id": gap.resolved_unit_id,
+                "sample_questions": gap.sample_questions_json or [],
             }
             for gap in rows
         ]
+
+    def list_faqs(self, **filters) -> tuple[int, list[dict]]:
+        """已发布 FAQ 库（``GET /api/settlement/faqs``，第 14 章 #6）。
+
+        实现在 ``faq_library.FaqLibraryService``，本方法只转发。
+        """
+        return self._faq_library.list_faqs(**filters)
 
     # ------------------------------------------------------------------ 审核
 
@@ -239,6 +256,22 @@ class SettlementService:
         # 第 5 步：提交
         self._session.commit()
         return faq
+
+    # ------------------------------------------------------------------ 下线
+
+    def offline_faq(self, faq_id: int, reviewer_id: int | None = None) -> Faq:
+        """让一条已发布 FAQ 下线（``POST /api/settlement/faqs/{id}/offline``，第 14 章 #6）。"""
+        return self._faq_library.offline(faq_id, reviewer_id)
+
+    # ------------------------------------------------------------------ 缺口
+
+    def resolve_gap(self, gap_id: int, unit_id: int) -> KnowledgeGap:
+        """把知识缺口置为已解决并关联补全的知识单元（第 14 章 #7、11.4）。"""
+        return self._gaps.resolve(gap_id, unit_id)
+
+    def ignore_gap(self, gap_id: int) -> KnowledgeGap:
+        """把知识缺口置为已忽略（第 14 章 #7、11.4）。"""
+        return self._gaps.ignore(gap_id)
 
     # ------------------------------------------------------------------ 内部
 

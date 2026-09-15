@@ -23,6 +23,7 @@ __all__ = [
     "FaqStatus",
     "KnowledgeGapStatus",
     "FileType",
+    "UnitStatus",
     "UserStatus",
 ]
 
@@ -102,3 +103,17 @@ class UserStatus(IntEnum):
 
     ENABLED = 1   # 启用
     DISABLED = 0  # 停用
+
+
+class UnitStatus(str, Enum):
+    """``knowledge_units.status`` 的取值（第 14 章 #13）。
+
+    7.3 的 DDL 给该列的默认值是 ``active``，#13 的确认列填的正是 ``active``，
+    因此这里**只定义这一个已确认的取值**。
+
+    第 14 章 #13 的原文举例里还提到过 ``archived`` / ``draft``，
+    但确认列没有把它们纳入，故不臆造 —— 需要时在下方补一个成员即可，
+    接口层的白名单校验（``KnowledgeUnitService.update_status``）会自动接纳。
+    """
+
+    ACTIVE = "active"  # 生效中（文档 7.3 的列默认值）
